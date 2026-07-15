@@ -223,6 +223,13 @@ class TranscriptionApp(App):
             out.append("\n")
             out.append(self.rows[self.row_cursor]["text"] or "(empty transcript)")
             out.append("\n")
+        if self.error:
+            # The one-line status dock CROPS long errors (stress-drive finding:
+            # a composition failure dict died at 40 chars) — the pane wraps, so
+            # the FULL error always lands here.
+            out.append("\n")
+            out.append(self.error, style="red")
+            out.append("\n")
         return out
 
     # ---- stage actions (single key vocabulary, stage-dispatched) ----
