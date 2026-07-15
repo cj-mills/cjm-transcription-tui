@@ -45,6 +45,7 @@ class SegmentProbe:
         self.raw_segments: List[Any] = []
         self.duration = 0.0
         self._rows: Dict[int, List[Dict[str, Any]]] = {}
+        self.active_comp_id = None  # In-flight probe composition (escape-cancel target)
 
     async def prepare(self) -> int:  # Segment count after cutting
         """Convert -> VAD -> boundaries -> cut the source once; return segment count."""
@@ -79,6 +80,23 @@ class SegmentProbe:
                 "rss_mb_peak": rec.memory_mb_peak_max,
                 "samples": rec.sample_count}
 
+    async def cancel_active(self) -> bool:  # True when a cancel was dispatched
+        """Cancel the in-flight probe composition, if any (the escape gesture).
+
+        Cooperative substrate cancellation with force fallback; the waiting
+        compare() then surfaces the cancelled composition as a status error
+        instead of leaving the operator staring at a spinner (drive-1 finding
+        30057f10 — pairs with the queue's never-fits fail-fast 532ea1da).
+        """
+        comp_id = self.active_comp_id
+        if comp_id is None:
+            return False
+        try:
+            await self.queue.cancel_composition(comp_id)
+            return True
+        except Exception:
+            return False
+
     async def compare(self, index: int) -> List[Dict[str, Any]]:
         """Transcribe segment `index` across every candidate; one row per candidate."""
         if index in self._rows:
@@ -89,7 +107,11 @@ class SegmentProbe:
             self.cfg.ffmpeg_capability, self.transcriber_ids,
             sample_rate=self.cfg.sample_rate, channels=self.cfg.channels)
         comp_id = await self.queue.submit_composition(comp)
-        crun = await self.queue.wait_for_composition(comp_id)
+        self.active_comp_id = comp_id
+        try:
+            crun = await self.queue.wait_for_composition(comp_id)
+        finally:
+            self.active_comp_id = None
         records = records_from_composition(crun, metas)
         rec = records[0] if records else None
         rows: List[Dict[str, Any]] = []

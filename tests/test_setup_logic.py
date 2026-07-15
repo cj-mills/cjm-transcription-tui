@@ -8,11 +8,12 @@ from pathlib import Path
 
 from cjm_transcription_core.cli import build_parser as core_build_parser
 from cjm_transcription_core.cli import parse_transcriber_spec
-from cjm_transcription_tui.candidates import (candidate_directives, instance_id_for,
-                                              model_axis, spec_string,
+from cjm_transcription_tui.candidates import (candidate_directives, discover_capability,
+                                              instance_id_for, model_axis, spec_string,
                                               transcription_manifests)
 from cjm_transcription_tui.cli import build_parser, plan_argv
 from cjm_transcription_tui.sources import SourceBrowser
+from cjm_transcription_tui.state import load_state, save_state, state_path
 
 
 def _write_manifest(d, name, methods, props):
@@ -94,9 +95,9 @@ def test_source_browser_walk_and_selection(tmp_path):
 
 
 def test_plan_argv_parses_in_the_core_cli(tmp_path):
-    args = build_parser().parse_args([
-        "--graph-capability", "cjm-capability-graph-sqlite",
-        "--graph-db-path", "/tmp/g.db", "--actor", "tui:test"])
+    # graph/sysmon ride the PLAN (resolved flags > state > discovery in main);
+    # only preprocessing/actor still pass through from the raw args
+    args = build_parser().parse_args(["--actor", "tui:test"])
     src = tmp_path / "ep1.mp3"
     src.write_bytes(b"x")
     plan = {"sources": [str(src)],
@@ -104,6 +105,8 @@ def test_plan_argv_parses_in_the_core_cli(tmp_path):
                              "cjm-capability-voxtral-hf"],
             "lightweight": "whisper--tiny", "accuracy": "cjm-capability-voxtral-hf",
             "max_segment_duration": 220.0, "sysmon_capability": None,
+            "graph_capability": "cjm-capability-graph-sqlite",
+            "graph_db_path": "/tmp/g.db",
             "manifests_dir": ".cjm/manifests"}
     argv = plan_argv(plan, args)
     # the hand-off contract: the rendered argv must parse in the CORE CLI
@@ -116,3 +119,29 @@ def test_plan_argv_parses_in_the_core_cli(tmp_path):
     assert parsed.graph_db_path == "/tmp/g.db"
     assert parsed.actor == "tui:test"
     assert parsed.sysmon_capability is None
+
+
+def test_state_roundtrip_and_role_discovery(tmp_path):
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    # role discovery is surface-based: graph storage = add_nodes, monitor =
+    # get_system_status; a transcriber must match NEITHER role
+    _write_manifest(manifests, "cjm-capability-graph-sqlite",
+                    ["add_nodes", "add_edges", "find_nodes_by_label"], {})
+    _write_manifest(manifests, "cjm-capability-monitor-nvidia",
+                    ["get_system_status", "list_processes"], {})
+    _write_manifest(manifests, "cjm-capability-whisper", ["transcribe"], {})
+    assert discover_capability(str(manifests), "add_nodes") == "cjm-capability-graph-sqlite"
+    assert discover_capability(str(manifests), "get_system_status") == "cjm-capability-monitor-nvidia"
+    assert discover_capability(str(manifests), "no_such_method") is None
+
+    # state sidecar lands NEXT TO the manifests dir and round-trips merges
+    assert load_state(str(manifests)) == {}
+    save_state(str(manifests), graph_capability="cjm-capability-graph-sqlite",
+               picked_instance_ids=["whisper--tiny"])
+    save_state(str(manifests), last_cwd="/data/podcasts")
+    state = load_state(str(manifests))
+    assert state == {"graph_capability": "cjm-capability-graph-sqlite",
+                     "picked_instance_ids": ["whisper--tiny"],
+                     "last_cwd": "/data/podcasts"}
+    assert state_path(str(manifests)).parent == tmp_path

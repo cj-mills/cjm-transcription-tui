@@ -11,6 +11,8 @@ from typing import Any, Dict, List
 from cjm_transcription_core.cli import main as core_main
 
 from .app import TranscriptionApp
+from .candidates import discover_capability
+from .state import load_state, save_state
 
 
 def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
@@ -29,13 +31,21 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                    help="Browser root for the sources stage")
     p.add_argument("--sysmon-capability", default=None,
                    help="monitor capability for GPU attribution (loads first in the "
-                        "comparison stack; also forwarded to the confirmed run)")
+                        "comparison stack; also forwarded to the confirmed run; "
+                        "default: last-used, else auto-discovered from manifests)")
+    p.add_argument("--no-sysmon", action="store_true",
+                   help="Explicitly disable the monitor (overrides state + discovery)")
     p.add_argument("--max-segment-duration", type=float, default=220.0,
                    help="Segment wall-clock cap (probe AND forwarded run)")
     p.add_argument("--graph-capability", default=None,
-                   help="Forwarded to the confirmed run (graph emission)")
+                   help="Graph-storage capability for run emission (default: last-used, "
+                        "else auto-discovered from manifests — journaling is ON by default)")
+    p.add_argument("--no-graph", action="store_true",
+                   help="Explicitly disable graph emission — the run will NOT be journaled "
+                        "(overrides state + discovery; the status line stays red)")
     p.add_argument("--graph-db-path", default=None,
-                   help="Forwarded to the confirmed run (requires --graph-capability)")
+                   help="Explicit graph db path (default: last-used, else the capability's "
+                        "configured db_path)")
     p.add_argument("--preprocessing-capability", default=None,
                    help="Forwarded to the confirmed run (e.g. cjm-capability-demucs)")
     p.add_argument("--actor", default=None,
@@ -63,10 +73,10 @@ def plan_argv(
         argv += ["--transcriber", spec]
     if plan.get("sysmon_capability"):
         argv += ["--sysmon-capability", plan["sysmon_capability"]]
-    if args.graph_capability:
-        argv += ["--graph-capability", args.graph_capability]
-        if args.graph_db_path:
-            argv += ["--graph-db-path", args.graph_db_path]
+    if plan.get("graph_capability"):
+        argv += ["--graph-capability", plan["graph_capability"]]
+        if plan.get("graph_db_path"):
+            argv += ["--graph-db-path", plan["graph_db_path"]]
     if args.preprocessing_capability:
         argv += ["--preprocessing-capability", args.preprocessing_capability]
     if args.actor:
@@ -75,18 +85,41 @@ def plan_argv(
 
 
 def main() -> int:  # Console-script entry point (cjm-transcription-tui)
-    """Run the setup app; on a confirmed plan, print + exec the headless run."""
+    """Resolve settings (flags > persisted state > manifest discovery), run the
+    setup app, persist the confirmed choices, then print + exec the headless run."""
     args = build_parser().parse_args()
-    app = TranscriptionApp(args.manifests_dir, start_dir=args.start_dir,
+    state = load_state(args.manifests_dir)
+    # Journaling-by-default (drive-1 finding): an unjournaled run takes an
+    # EXPLICIT --no-graph, never a forgotten flag; sysmon likewise.
+    graph_capability = None if args.no_graph else (
+        args.graph_capability or state.get("graph_capability")
+        or discover_capability(args.manifests_dir, "add_nodes"))
+    graph_db_path = args.graph_db_path or state.get("graph_db_path")
+    sysmon = None if args.no_sysmon else (
+        args.sysmon_capability or state.get("sysmon_capability")
+        or discover_capability(args.manifests_dir, "get_system_status"))
+    start_dir = args.start_dir if args.start_dir != "." else (state.get("last_cwd") or ".")
+    app = TranscriptionApp(args.manifests_dir, start_dir=start_dir,
                            initial_sources=args.paths or None,
-                           sysmon_capability=args.sysmon_capability,
+                           sysmon_capability=sysmon,
+                           graph_capability=graph_capability,
+                           graph_db_path=graph_db_path,
+                           initial_picks=state.get("picked_instance_ids"),
                            max_segment_duration=args.max_segment_duration)
     plan = app.run()
     if not plan:
         print("no run confirmed")
         return 0
+    save_state(args.manifests_dir,
+               graph_capability=plan["graph_capability"],
+               graph_db_path=plan["graph_db_path"],
+               sysmon_capability=plan["sysmon_capability"],
+               picked_instance_ids=plan["picked_instance_ids"],
+               last_cwd=plan["last_cwd"])
     argv = plan_argv(plan, args)
     print(f"pair: lightweight={plan['lightweight']}  accuracy={plan['accuracy']}")
+    if not plan["graph_capability"]:
+        print("WARNING: graph emission OFF — this run will NOT be journaled (--no-graph)")
     print("handing off: " + shlex.join(["cjm-transcription-core"] + argv))
     if args.plan_only:
         return 0

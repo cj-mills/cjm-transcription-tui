@@ -68,6 +68,7 @@ class TranscriptionApp(App):
         Binding("left_square_bracket", "segment(-1)", "prev segment", key_display="["),
         Binding("right_square_bracket", "segment(1)", "next segment", key_display="]"),
         Binding("r", "rerun", "re-probe segment"),
+        Binding("escape", "cancel_probe", "cancel probe", show=False, priority=True),
         Binding("q", "quit_app", "quit"),
     ]
 
@@ -75,10 +76,15 @@ class TranscriptionApp(App):
                  *, start_dir: str = ".",                # Browser root for the sources stage
                  initial_sources: Optional[List[str]] = None,  # Pre-selected paths (CLI args)
                  sysmon_capability: Optional[str] = None,      # Monitor for GPU attribution (CR-7)
+                 graph_capability: Optional[str] = None,       # Journal target (None = NOT JOURNALED)
+                 graph_db_path: Optional[str] = None,          # Caller-wins graph db override
+                 initial_picks: Optional[List[str]] = None,    # Persisted candidate instance ids
                  max_segment_duration: float = 220.0):   # Segment wall-clock cap (probe + plan)
         super().__init__()
         self.manifests_dir = manifests_dir
         self.sysmon_capability = sysmon_capability
+        self.graph_capability = graph_capability
+        self.graph_db_path = graph_db_path
         self.max_segment_duration = max_segment_duration
         self.browser = SourceBrowser(start_dir)
         for p in initial_sources or []:
@@ -87,6 +93,12 @@ class TranscriptionApp(App):
         self.cand_cursor = 0
         self.cand_picked: List[int] = [i for i, c in enumerate(self.candidates)
                                        if c["default"]]
+        if initial_picks:
+            wanted = set(initial_picks)
+            restored = [i for i, c in enumerate(self.candidates)
+                        if c["instance_id"] in wanted]
+            if restored:
+                self.cand_picked = restored
         self.stage = "sources"
         self.busy: Optional[str] = None   # Non-None = a probe/load is in flight (message)
         self.error: Optional[str] = None
@@ -119,6 +131,12 @@ class TranscriptionApp(App):
                 "compare": self._paint_compare}[self.stage]()
         self.query_one("#main", Static).update(pane)
         status = Text()
+        # The journal chip is ALWAYS visible (drive-1: an unjournaled run must
+        # take an explicit opt-out, and the state must be impossible to miss).
+        if self.graph_capability:
+            status.append(f" journal→{self.graph_capability} ", style="green")
+        else:
+            status.append(" NOT JOURNALED ", style="bold red")
         if self.error:
             status.append(f" {self.error} ", style="bold red")
         elif self.busy:
@@ -295,6 +313,10 @@ class TranscriptionApp(App):
             self.probe._rows.pop(self.seg_index, None)
             self.run_worker(self._run_compare(), exclusive=True)
 
+    async def action_cancel_probe(self) -> None:
+        if self.probe is not None and self.busy:
+            await self.probe.cancel_active()
+
     async def action_quit_app(self) -> None:
         await self._teardown_stack()
         self.exit(None)
@@ -404,7 +426,12 @@ class TranscriptionApp(App):
             "accuracy": acc,
             "max_segment_duration": self.max_segment_duration,
             "sysmon_capability": self.sysmon_capability,
+            "graph_capability": self.graph_capability,
+            "graph_db_path": self.graph_db_path,
             "manifests_dir": self.manifests_dir,
+            # Persistence payload (state.py): choices the operator never retypes.
+            "picked_instance_ids": [d["instance_id"] for d in self._picked_directives()],
+            "last_cwd": str(self.browser.cwd),
         }
         await self._teardown_stack()
         self.exit(plan)

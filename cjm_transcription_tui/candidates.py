@@ -22,25 +22,10 @@ def transcription_manifests(
 ) -> Dict[str, Dict[str, Any]]:  # capability name -> its manifest `code` section
     """Enumerate installed transcription capabilities from their manifest files.
 
-    A capability qualifies by SURFACE, not by name: its structural_surface lists
-    a `transcribe` method — the same signal the substrate's adapter auto-binding
-    matches against the transcription protocol, read cheaply off the manifest
-    json (no worker spawn). Adapter unit manifests carry no `code` section and
-    are skipped; unreadable files are skipped rather than failing enumeration.
+    The `transcribe` specialization of manifests_with_method (kept as the
+    candidate-space entry point; see that symbol for the surface-match rationale).
     """
-    out: Dict[str, Dict[str, Any]] = {}
-    for f in sorted(Path(manifests_dir).glob("*.json")):
-        try:
-            manifest = json.loads(f.read_text())
-        except (OSError, ValueError):
-            continue
-        code = manifest.get("code") if isinstance(manifest, dict) else None
-        if not isinstance(code, dict):
-            continue
-        methods = ((code.get("structural_surface") or {}).get("methods") or [])
-        if any(m.get("name") == "transcribe" for m in methods):
-            out[code.get("name") or f.stem] = code
-    return out
+    return manifests_with_method(manifests_dir, "transcribe")
 
 
 def model_axis(
@@ -129,3 +114,48 @@ def spec_string(
             return str(v)
         spec += ":" + ",".join(f"{k}={render(v)}" for k, v in config.items())
     return spec
+
+
+def manifests_with_method(
+    manifests_dir: str,  # Capability manifests directory (the core CLI's --manifests-dir)
+    method: str,         # Structural-surface method that identifies the role
+) -> Dict[str, Dict[str, Any]]:  # capability name -> its manifest `code` section
+    """Enumerate installed capabilities whose structural surface lists `method`.
+
+    Capabilities qualify by SURFACE, not by name — the same signal the
+    substrate's adapter auto-binding matches against a task protocol, read
+    cheaply off the manifest json (no worker spawn). Role keys in use:
+    `transcribe` (transcription tools), `add_nodes` (graph storage),
+    `get_system_status` (system monitor). Adapter unit manifests carry no
+    `code` section and are skipped; unreadable files are skipped rather than
+    failing enumeration.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for f in sorted(Path(manifests_dir).glob("*.json")):
+        try:
+            manifest = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        code = manifest.get("code") if isinstance(manifest, dict) else None
+        if not isinstance(code, dict):
+            continue
+        methods = ((code.get("structural_surface") or {}).get("methods") or [])
+        if any(m.get("name") == method for m in methods):
+            out[code.get("name") or f.stem] = code
+    return out
+
+
+def discover_capability(
+    manifests_dir: str,  # Capability manifests directory
+    method: str,         # Surface method that identifies the role
+) -> Optional[str]:  # First matching capability name (sorted), or None
+    """Pick a DEFAULT capability for a role by surface match.
+
+    Journaling-by-default (drive-1 finding): when the runtime has a graph
+    storage (`add_nodes`) or a monitor (`get_system_status`) installed, the TUI
+    should use it without being told — forgetting must take an explicit opt-out,
+    not a forgotten flag. Sorted-first keeps the pick deterministic when several
+    qualify; the operator's persisted choice (state.py) wins over discovery.
+    """
+    names = sorted(manifests_with_method(manifests_dir, method))
+    return names[0] if names else None

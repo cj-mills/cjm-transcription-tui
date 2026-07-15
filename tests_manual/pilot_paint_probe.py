@@ -26,6 +26,9 @@ async def drive(start_dir: Path, manifests_dir: str) -> None:
 
         assert app.stage == "sources"
         assert "Selected (0" in paint(), paint()
+        # journal chip: this probe passes no graph capability -> loud red state
+        chip = str(app.query_one("#status", Static).render())
+        assert "NOT JOURNALED" in chip, chip
         await pilot.press("enter")            # cursor starts on ep1.mp3 -> select
         assert len(app.browser.selected) == 1, app.browser.selected
         assert "[x]" in paint() and "Selected (1" in paint()
