@@ -25,7 +25,7 @@ from textual.widgets import Static
 from .candidates import candidate_directives, spec_string
 from .probe import SegmentProbe
 from .sources import SourceBrowser
-from .viewport import visible_slice
+from .viewport import tail, visible_slice
 
 
 class TranscriptionApp(App):
@@ -187,8 +187,13 @@ class TranscriptionApp(App):
         self.query_one("#status", Static).update(status)
 
     def _paint_sources(self) -> Text:
+        # Every listing row is clamped to ONE screen line (drive-2 follow-up
+        # finding: word-wrapped names each ate extra lines, pushing the pane
+        # tail off-screen — the windowing budget counts LINES, so rows must
+        # hold to one; prose regions like transcripts still wrap by design).
+        width = max(20, self.size.width)
         out = Text()
-        out.append(f" {self.browser.cwd}\n", style="bold")
+        out.append(f" {tail(str(self.browser.cwd), width - 1)}\n", style="bold")
         rows = self.browser.entries()
         self.browser.cursor = max(0, min(self.browser.cursor, max(0, len(rows) - 1)))
         # Cursor-windowed listing (drive-2: long directories ran off-screen).
@@ -207,10 +212,13 @@ class TranscriptionApp(App):
             entry = rows[i]
             focus = (i == self.browser.cursor)
             picked = keys[i] in sel_set
-            out.append(" > " if focus else "   ", style="bold cyan" if focus else "dim")
-            out.append("[x] " if picked else "[ ] ", style="green" if picked else "dim")
+            line = Text()
+            line.append(" > " if focus else "   ", style="bold cyan" if focus else "dim")
+            line.append("[x] " if picked else "[ ] ", style="green" if picked else "dim")
             name = entry.name + ("/" if entry.is_dir() else "")
-            out.append(name, style="bold" if focus else ("" if entry.is_file() else "blue"))
+            line.append(name, style="bold" if focus else ("" if entry.is_file() else "blue"))
+            line.truncate(width, overflow="ellipsis")
+            out.append_text(line)
             out.append("\n")
         if below:
             out.append(f"   … {below} below\n", style="dim")
@@ -221,7 +229,7 @@ class TranscriptionApp(App):
             out.append(f"   … {len(sel) - sel_shown} earlier\n", style="dim")
         for s in sel[len(sel) - sel_shown:]:
             kind = "dir " if Path(s).is_dir() else "file"
-            out.append(f"   {kind}  {s}\n", style="green")
+            out.append(f"   {kind}  {tail(s, width - 9)}\n", style="green")
         return out
 
     def _paint_candidates(self) -> Text:
@@ -240,6 +248,7 @@ class TranscriptionApp(App):
                                                  self.cand_cursor, budget)
         if above:
             out.append(f"   … {above} above\n", style="dim")
+        width = max(20, self.size.width)
         last_cap = None
         for i in range(start, end):
             c = self.candidates[i]
@@ -248,22 +257,31 @@ class TranscriptionApp(App):
                 last_cap = c["capability"]
             focus = (i == self.cand_cursor)
             picked = i in self.cand_picked
-            out.append(" > " if focus else "   ", style="bold cyan" if focus else "dim")
-            out.append("[x] " if picked else "[ ] ", style="green" if picked else "dim")
+            line = Text()
+            line.append(" > " if focus else "   ", style="bold cyan" if focus else "dim")
+            line.append("[x] " if picked else "[ ] ", style="green" if picked else "dim")
             label = c["model"] if c["model"] is not None else "(no model axis)"
-            out.append(str(label), style="bold" if focus else "")
+            line.append(str(label), style="bold" if focus else "")
             if c["default"]:
-                out.append("  (default)", style="dim")
-            out.append(f"  -> {c['instance_id']}\n", style="dim")
+                line.append("  (default)", style="dim")
+            line.append(f"  -> {c['instance_id']}", style="dim")
+            line.truncate(width, overflow="ellipsis")
+            out.append_text(line)
+            out.append("\n")
         if below:
             out.append(f"   … {below} below\n", style="dim")
         return out
 
     def _paint_compare(self) -> Text:
+        width = max(20, self.size.width)
         out = Text()
         src = self._probe_source() or "?"
-        out.append(f" {Path(src).name}", style="bold")
-        out.append(f"   segment {self.seg_index + 1}/{self.seg_count}\n\n", style="dim")
+        header = Text()
+        header.append(f" {Path(src).name}", style="bold")
+        header.append(f"   segment {self.seg_index + 1}/{self.seg_count}", style="dim")
+        header.truncate(width, overflow="ellipsis")
+        out.append_text(header)
+        out.append("\n\n")
         if self.busy:
             # The status dock ellipsizes (one line, no wrap) — the FULL busy
             # text, blocked-candidate detail included, wraps here where it
@@ -282,18 +300,21 @@ class TranscriptionApp(App):
                 marks.append("L")
             if self.marks["accuracy"] == row["instance_id"]:
                 marks.append("A")
-            out.append(" > " if focus else "   ", style="bold cyan" if focus else "dim")
-            out.append(f"[{','.join(marks) or ' '}] ",
-                       style="green" if marks else "dim")
-            out.append(row["instance_id"], style="bold" if focus else "")
-            out.append(f"  {row['chars']} chars", style="dim")
+            line = Text()
+            line.append(" > " if focus else "   ", style="bold cyan" if focus else "dim")
+            line.append(f"[{','.join(marks) or ' '}] ",
+                        style="green" if marks else "dim")
+            line.append(row["instance_id"], style="bold" if focus else "")
+            line.append(f"  {row['chars']} chars", style="dim")
             prof = row.get("profile") or {}
             if prof:
-                out.append(
+                line.append(
                     f"  ~{prof['duration_s_mean']:.1f}s/seg"
                     f"  gpu {prof['gpu_mb_peak']:.0f}MB"
                     f"  rss {prof['rss_mb_peak']:.0f}MB"
                     f"  (n={prof['samples']})", style="dim")
+            line.truncate(width, overflow="ellipsis")
+            out.append_text(line)
             out.append("\n")
         if below:
             out.append(f"   … {below} below\n", style="dim")

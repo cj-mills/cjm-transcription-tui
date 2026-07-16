@@ -34,3 +34,22 @@ def visible_slice(
     start = max(0, min(cursor - inner // 2, count - inner))
     end = start + inner
     return start, end, start, count - end
+
+
+def tail(
+    s: str,      # The string to clamp (paths: the end is the readable part)
+    width: int,  # Max characters INCLUDING the leading ellipsis
+) -> str:  # s unchanged, or an ellipsis + its last width-1 characters
+    """Clamp a string to width keeping its END.
+
+    The row discipline's complement for path-like strings: a filename's tail
+    is what the operator reads, so clamping cuts the front (tail-ellipsis
+    truncation cuts the wrong end for cwd headers and selected-source rows).
+    """
+    if width <= 0:
+        return ""
+    if len(s) <= width:
+        return s
+    if width == 1:
+        return "…"
+    return "…" + s[-(width - 1):]

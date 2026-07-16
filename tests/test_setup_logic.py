@@ -13,7 +13,7 @@ from cjm_transcription_tui.candidates import (candidate_directives, discover_cap
                                               transcription_manifests)
 from cjm_transcription_tui.cli import build_parser, plan_argv
 from cjm_transcription_tui.sources import SourceBrowser
-from cjm_transcription_tui.viewport import visible_slice
+from cjm_transcription_tui.viewport import tail, visible_slice
 from cjm_transcription_tui.state import load_state, save_state, state_path
 
 
@@ -190,3 +190,13 @@ def test_source_browser_listing_cache(tmp_path):
     assert [e.name for e in b.entries()][0] == "sub"
     # keys stay row-aligned with entries after every re-enumeration
     assert len(b.entry_keys()) == len(b.entries())
+
+
+def test_tail_clamps_keeping_the_end():
+    # Paths clamp from the FRONT — the filename end is the readable part
+    assert tail("/very/long/path/episode-042.mp3", 16) == "…episode-042.mp3"
+    assert tail("short.mp3", 16) == "short.mp3"       # within width: unchanged
+    assert tail("abcdef", 6) == "abcdef"              # exactly width: unchanged
+    assert tail("abcdef", 5) == "…cdef"               # ellipsis counts against width
+    assert tail("abcdef", 1) == "…"
+    assert tail("abcdef", 0) == ""

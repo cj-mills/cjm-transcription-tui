@@ -67,6 +67,8 @@ def main() -> None:
         tmp = Path(td)
         for i in range(60):
             (tmp / f"f{i:03d}.mp3").write_bytes(b"x")
+        # Sorts first: the one-line row discipline must ellipsize it, never wrap
+        (tmp / ("a" * 100 + ".mp3")).write_bytes(b"x")
         asyncio.run(drive_windowing(tmp))
 
 
@@ -85,17 +87,24 @@ async def drive_windowing(start_dir: Path) -> None:
 
         body = paint()
         assert "below" in body, body[:400]     # tail hidden behind the indicator
-        assert "f000.mp3" in body              # cursor row (first entry) painted
+        assert "f000.mp3" in body              # near-cursor rows painted
         assert "f059.mp3" not in body          # far tail is NOT painted
-        for _ in range(59):                    # held-j to the end (coalesced)
+        # One-line row discipline: the 100-char name (cursor row, sorts first)
+        # is ellipsized, and NO pane line exceeds the pane width — wrapped rows
+        # ate extra screen lines and pushed the pane tail off-screen.
+        assert "…" in body, body[:400]
+        assert "a" * 100 not in body
+        assert max(len(ln) for ln in body.splitlines()) <= 80, \
+            max(body.splitlines(), key=len)
+        for _ in range(60):                    # held-j to the end (coalesced)
             app.action_move(1)
-        assert app.browser.cursor == 59
+        assert app.browser.cursor == 60
         body = paint()
         assert "f059.mp3" in body and "above" in body, body[:400]
         app.on_mouse_scroll_up(None)           # wheel = the j/k cursor walk
-        assert app.browser.cursor == 58
+        assert app.browser.cursor == 59
         await pilot.press("q")
-    print("pilot OK: viewport windowing, wheel scroll, coalesced paint flush")
+    print("pilot OK: viewport windowing, wheel scroll, one-line rows, coalesced flush")
 
 
 # Entry point (kept LAST: regions append in order, and the dispatch must
