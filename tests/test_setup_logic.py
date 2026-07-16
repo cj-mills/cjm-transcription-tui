@@ -163,3 +163,30 @@ def test_visible_slice_windows_the_cursor():
     # Degenerate inputs stay sane
     assert visible_slice(10, 3, 0) == (0, 0, 0, 10)
     assert visible_slice(0, 0, 5) == (0, 0, 0, 0)
+
+
+def test_source_browser_listing_cache(tmp_path):
+    # Per-event navigation must NOT re-enumerate the cwd (finding 3a3db22c:
+    # a full iterdir+stat pass per free-spin wheel tick froze the UI)
+    (tmp_path / "a.wav").write_bytes(b"x")
+    b = SourceBrowser(str(tmp_path))
+    rows = b.entries()
+    assert [e.name for e in rows] == ["a.wav"]
+    assert b.entry_keys() == [str((tmp_path / "a.wav").resolve())]
+    # a file added behind the cache stays invisible to plain navigation...
+    (tmp_path / "b.wav").write_bytes(b"x")
+    assert b.entries() is rows                  # same cached object, no rescan
+    # ...until an explicit refresh (the app calls it on stage re-entry)
+    b.refresh()
+    assert [e.name for e in b.entries()] == ["a.wav", "b.wav"]
+    # cwd changes invalidate naturally (enter/up)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "c.mp3").write_bytes(b"x")
+    b.refresh()
+    b.enter()                                   # descend sub/ (dirs sort first)
+    assert b.cwd == (tmp_path / "sub").resolve()
+    assert [e.name for e in b.entries()] == ["c.mp3"]
+    b.up()
+    assert [e.name for e in b.entries()][0] == "sub"
+    # keys stay row-aligned with entries after every re-enumeration
+    assert len(b.entry_keys()) == len(b.entries())

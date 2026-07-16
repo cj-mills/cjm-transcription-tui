@@ -199,12 +199,14 @@ class TranscriptionApp(App):
         entry_budget = max(3, height - 3 - sel_shown - (1 if len(sel) > sel_shown else 0))
         start, end, above, below = visible_slice(len(rows), self.browser.cursor,
                                                  entry_budget)
+        keys = self.browser.entry_keys()
+        sel_set = set(sel)
         if above:
             out.append(f"   … {above} above\n", style="dim")
         for i in range(start, end):
             entry = rows[i]
             focus = (i == self.browser.cursor)
-            picked = str(entry.resolve()) in self.browser.selected
+            picked = keys[i] in sel_set
             out.append(" > " if focus else "   ", style="bold cyan" if focus else "dim")
             out.append("[x] " if picked else "[ ] ", style="green" if picked else "dim")
             name = entry.name + ("/" if entry.is_dir() else "")
@@ -388,6 +390,9 @@ class TranscriptionApp(App):
         self.error = None
         if self.stage == "candidates":
             self.stage = "sources"
+            # Re-entering the browser is the one moment external changes
+            # (new recordings) should show up — navigation itself stays cached.
+            self.browser.refresh()
         elif self.stage == "compare":
             # Switch stages IMMEDIATELY — the serial model unloads were the
             # felt delay (drive-2) — and tear the stack down in the background.

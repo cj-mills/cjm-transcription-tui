@@ -9,7 +9,7 @@ run time, keeping the TUI and headless runs byte-identical in behavior.
 """
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from cjm_transcription_core.cli import MEDIA_SUFFIXES
 
@@ -30,17 +30,41 @@ class SourceBrowser:
         self.cwd = Path(start_dir).resolve()
         self.cursor = 0
         self.selected: List[str] = []
+        self._cache_cwd: Optional[Path] = None  # entries() cache key (None = cold)
+        self._cache: List[Path] = []            # cached listing (dirs then files)
+        self._cache_keys: List[str] = []        # resolved() strings, row-aligned
 
     def entries(self) -> List[Path]:
-        """The cwd's browsable rows: visible dirs, then media files (sorted)."""
-        try:
-            children = list(self.cwd.iterdir())
-        except OSError:
-            children = []
-        dirs = sorted(c for c in children if c.is_dir() and not c.name.startswith("."))
-        files = sorted(c for c in children if c.is_file()
-                       and c.suffix.lower() in MEDIA_SUFFIXES)
-        return dirs + files
+        """The cwd's browsable rows: visible dirs, then media files (sorted).
+
+        CACHED per cwd (drive-2 finding 3a3db22c): navigation calls this on
+        EVERY input event, and a full re-enumeration (iterdir + a stat per
+        child + sorts) per free-spin wheel tick froze the UI on cold/large
+        directories. enter()/up() invalidate by changing cwd; refresh() drops
+        the cache explicitly (the app calls it on re-entering the stage)."""
+        if self._cache_cwd != self.cwd:
+            try:
+                children = list(self.cwd.iterdir())
+            except OSError:
+                children = []
+            dirs = sorted(c for c in children
+                          if c.is_dir() and not c.name.startswith("."))
+            files = sorted(c for c in children if c.is_file()
+                           and c.suffix.lower() in MEDIA_SUFFIXES)
+            self._cache = dirs + files
+            self._cache_keys = [str(p.resolve()) for p in self._cache]
+            self._cache_cwd = self.cwd
+        return self._cache
+
+    def entry_keys(self) -> List[str]:
+        """Resolved-path keys row-aligned with entries() — the selection
+        membership check without a per-row resolve() (each one is a syscall)."""
+        self.entries()
+        return self._cache_keys
+
+    def refresh(self) -> None:
+        """Drop the listing cache: the next entries() re-enumerates the cwd."""
+        self._cache_cwd = None
 
     def focused(self) -> Path | None:
         """The entry under the cursor (None on an empty directory)."""
