@@ -389,6 +389,10 @@ class TranscriptionApp(App):
     async def _run_compare(self) -> None:
         if self.probe is None:
             return
+        # A new probe run owns the error slot — stale failure text under fresh
+        # rows made a SUCCESSFUL re-run read as failed (stress-drive 2, 00:16:55
+        # completed while the pane still showed the 00:11:59 error).
+        self.error = None
         self.busy = f"transcribing segment {self.seg_index + 1}/{self.seg_count} across {len(self.probe.transcriber_ids)} candidate(s)..."
         self._paint()
         try:
