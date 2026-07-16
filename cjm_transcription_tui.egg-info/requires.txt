@@ -1,2 +1,0 @@
-cjm-transcription-core>=0.0.3
-textual

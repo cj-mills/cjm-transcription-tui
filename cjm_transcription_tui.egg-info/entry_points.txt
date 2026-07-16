@@ -1,2 +1,0 @@
-[console_scripts]
-cjm-transcription-tui = cjm_transcription_tui.cli:main
