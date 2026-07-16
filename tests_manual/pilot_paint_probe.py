@@ -21,7 +21,10 @@ async def drive(start_dir: Path, manifests_dir: str) -> None:
     app = TranscriptionApp(manifests_dir, start_dir=str(start_dir))
     async with app.run_test() as pilot:
         def paint() -> str:
-            # Textual 8: Static.renderable is gone; render() returns the content
+            # Textual 8: Static.renderable is gone; render() returns the content.
+            # Repaints coalesce now (drive-2) — flush before reading so the
+            # assertion never races the trailing tick.
+            app._paint_now()
             return str(app.query_one("#main", Static).render())
 
         assert app.stage == "sources"
@@ -60,7 +63,42 @@ def main() -> None:
         tmp = Path(td)
         (tmp / "ep1.mp3").write_bytes(b"x")
         asyncio.run(drive(tmp, manifests_dir))
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        for i in range(60):
+            (tmp / f"f{i:03d}.mp3").write_bytes(b"x")
+        asyncio.run(drive_windowing(tmp))
 
 
+# __main__ dispatch lives at the END of the file — regions append in order,
+# and the dispatch must follow every driver it names.
+
+
+async def drive_windowing(start_dir: Path) -> None:
+    """A 60-file directory must window around the cursor, not run off-pane
+    (drive-2 ergonomics: viewport windowing + wheel scroll + coalesced paint)."""
+    app = TranscriptionApp(str(start_dir / "no-manifests"), start_dir=str(start_dir))
+    async with app.run_test() as pilot:
+        def paint() -> str:
+            app._paint_now()
+            return str(app.query_one("#main", Static).render())
+
+        body = paint()
+        assert "below" in body, body[:400]     # tail hidden behind the indicator
+        assert "f000.mp3" in body              # cursor row (first entry) painted
+        assert "f059.mp3" not in body          # far tail is NOT painted
+        for _ in range(59):                    # held-j to the end (coalesced)
+            app.action_move(1)
+        assert app.browser.cursor == 59
+        body = paint()
+        assert "f059.mp3" in body and "above" in body, body[:400]
+        app.on_mouse_scroll_up(None)           # wheel = the j/k cursor walk
+        assert app.browser.cursor == 58
+        await pilot.press("q")
+    print("pilot OK: viewport windowing, wheel scroll, coalesced paint flush")
+
+
+# Entry point (kept LAST: regions append in order, and the dispatch must
+# follow every driver it names).
 if __name__ == "__main__":
     main()

@@ -13,6 +13,7 @@ from cjm_transcription_tui.candidates import (candidate_directives, discover_cap
                                               transcription_manifests)
 from cjm_transcription_tui.cli import build_parser, plan_argv
 from cjm_transcription_tui.sources import SourceBrowser
+from cjm_transcription_tui.viewport import visible_slice
 from cjm_transcription_tui.state import load_state, save_state, state_path
 
 
@@ -145,3 +146,20 @@ def test_state_roundtrip_and_role_discovery(tmp_path):
                      "picked_instance_ids": ["whisper--tiny"],
                      "last_cwd": "/data/podcasts"}
     assert state_path(str(manifests)).parent == tmp_path
+
+
+def test_visible_slice_windows_the_cursor():
+    # Short lists render whole — no windowing, no hidden rows
+    assert visible_slice(5, 2, 10) == (0, 5, 0, 0)
+    assert visible_slice(10, 0, 10) == (0, 10, 0, 0)
+    # Overflow: 2 budget lines reserved for indicators, cursor centered
+    start, end, above, below = visible_slice(100, 50, 12)
+    assert (end - start) == 10 and start <= 50 < end
+    assert (above, below) == (start, 100 - end)
+    assert start + (end - start) // 2 == 50   # dead center, mid-list
+    # Clamped at both ends — the window never runs past the list
+    assert visible_slice(100, 0, 12) == (0, 10, 0, 90)
+    assert visible_slice(100, 99, 12) == (90, 100, 90, 0)
+    # Degenerate inputs stay sane
+    assert visible_slice(10, 3, 0) == (0, 0, 0, 10)
+    assert visible_slice(0, 0, 5) == (0, 0, 0, 0)
