@@ -8,6 +8,7 @@ the compare stage needs a live capability stack, so it stops at the gate.
 """
 
 import asyncio
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -60,9 +61,16 @@ def main() -> None:
     """Stage a throwaway media dir, then drive the app against real manifests."""
     manifests_dir = sys.argv[1] if len(sys.argv) > 1 else ".cjm/manifests"
     with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        (tmp / "ep1.mp3").write_bytes(b"x")
-        asyncio.run(drive(tmp, manifests_dir))
+        # The app WRITES sidecar state on quit (last_cwd) — drive a throwaway
+        # COPY of the manifests so pilot runs never touch project state. The
+        # copy lives BESIDE the media dir, not inside it (dirs sort first and
+        # would steal the cursor from ep1.mp3).
+        media = Path(td) / "media"
+        media.mkdir()
+        (media / "ep1.mp3").write_bytes(b"x")
+        mcopy = Path(td) / "manifests"
+        shutil.copytree(manifests_dir, mcopy)
+        asyncio.run(drive(media, str(mcopy)))
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         for i in range(60):

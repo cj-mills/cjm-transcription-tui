@@ -25,6 +25,7 @@ from textual.widgets import Static
 from .candidates import candidate_directives, spec_string
 from .probe import SegmentProbe
 from .sources import SourceBrowser
+from .state import save_state
 from .viewport import tail, visible_slice
 
 
@@ -436,6 +437,11 @@ class TranscriptionApp(App):
             await self.probe.cancel_active()
 
     async def action_quit_app(self) -> None:
+        # The browse position survives ANY exit, not just a confirmed run —
+        # last_cwd used to update only on the run hand-off (user paper cut,
+        # 2026-07-16), so quitting mid-browse lost the place. The confirm
+        # path still saves the full settings payload via the CLI.
+        save_state(self.manifests_dir, last_cwd=str(self.browser.cwd))
         await self._teardown_stack()
         self.exit(None)
 
