@@ -393,8 +393,11 @@ class TranscriptionApp(App):
         # rows made a SUCCESSFUL re-run read as failed (stress-drive 2, 00:16:55
         # completed while the pane still showed the 00:11:59 error).
         self.error = None
-        self.busy = f"transcribing segment {self.seg_index + 1}/{self.seg_count} across {len(self.probe.transcriber_ids)} candidate(s)..."
+        base = (f"transcribing segment {self.seg_index + 1}/{self.seg_count} "
+                f"across {len(self.probe.transcriber_ids)} candidate(s)...")
+        self.busy = base
         self._paint()
+        watcher = asyncio.create_task(self._watch_blocked(base))
         try:
             self.rows = await self.probe.compare(self.seg_index)
             self.row_cursor = min(self.row_cursor, max(0, len(self.rows) - 1))
@@ -402,7 +405,35 @@ class TranscriptionApp(App):
         except Exception as e:
             self.busy = None
             self.error = f"probe failed: {e}"
+        finally:
+            watcher.cancel()
         self._paint()
+
+    async def _watch_blocked(self, base: str) -> None:
+        """Append queue block reasons to the busy line while a compare runs.
+
+        A candidate blocked on resident-held VRAM used to pend with no visible
+        cause — the operator stared at the same busy line indefinitely (finding
+        c5bbd511, the admission deadlock repro). The queue now keeps
+        job.block_reason current (BLOCK_REASON_CHANGED); this poll is the read
+        model — 2s cadence is plenty for a status line, and cancellation in
+        _run_compare's finally bounds it to the compare's lifetime."""
+        while True:
+            await asyncio.sleep(2.0)
+            if self.queue is None or self.busy is None:
+                continue
+            try:
+                pending = self.queue.get_pending()
+            except Exception:
+                continue
+            blocked = [(j.capability_instance_id, j.block_reason)
+                       for j in pending if getattr(j, "block_reason", None)]
+            if blocked:
+                detail = " · ".join(f"{iid} {reason}" for iid, reason in blocked)
+                self.busy = f"{base} ⏳ blocked: {detail}"
+            else:
+                self.busy = base
+            self._paint()
 
     async def _teardown_stack(self) -> None:
         if self.queue is not None:
