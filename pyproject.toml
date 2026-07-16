@@ -15,6 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
 ]
 dependencies = [
+    'cjm-substrate-tui-kit>=0.0.1',
     'cjm-transcription-core>=0.0.3',
     'textual',
 ]

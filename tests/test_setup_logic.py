@@ -13,7 +13,7 @@ from cjm_transcription_tui.candidates import (candidate_directives, discover_cap
                                               transcription_manifests)
 from cjm_transcription_tui.cli import build_parser, plan_argv
 from cjm_transcription_tui.sources import SourceBrowser
-from cjm_transcription_tui.viewport import tail, visible_slice
+from cjm_substrate_tui_kit.viewport import tail, visible_slice
 from cjm_transcription_tui.state import load_state, save_state, state_path
 
 

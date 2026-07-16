@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.queue import JobQueue
+from cjm_substrate_tui_kit.viewport import tail, visible_slice
 from cjm_transcription_core.cli import expand_sources, load_capabilities
 from cjm_transcription_core.models import PipelineConfig
 from rich.text import Text
@@ -26,7 +27,6 @@ from .candidates import candidate_directives, spec_string
 from .probe import SegmentProbe
 from .sources import SourceBrowser
 from .state import save_state
-from .viewport import tail, visible_slice
 
 
 class TranscriptionApp(App):
