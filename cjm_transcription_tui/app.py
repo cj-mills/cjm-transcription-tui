@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.queue import JobQueue
+from cjm_substrate_tui_kit.repaint import RepaintThrottle
 from cjm_substrate_tui_kit.viewport import tail, visible_slice
 from cjm_transcription_core.cli import expand_sources, load_capabilities
 from cjm_transcription_core.models import PipelineConfig
@@ -114,9 +115,9 @@ class TranscriptionApp(App):
         self.rows: List[Dict[str, Any]] = []
         self.row_cursor = 0
         self.marks: Dict[str, Optional[str]] = {"lightweight": None, "accuracy": None}
-        # Repaint coalescing + background-unload state (drive-2 ergonomics batch)
-        self._paint_timer = None                          # Non-None = a repaint tick is armed
-        self._paint_dirty = False                         # A request landed while armed
+        # Repaint coalescing (kit RepaintThrottle) + background-unload state
+        self._throttle = RepaintThrottle(self._paint_now, self.set_timer,
+                                         self.REPAINT_INTERVAL)
         self._unload_task: Optional[asyncio.Task] = None  # In-flight background teardown
 
     def compose(self) -> ComposeResult:
@@ -134,27 +135,9 @@ class TranscriptionApp(App):
     REPAINT_INTERVAL = 1 / 30  # Coalescing window: at most ~30 full repaints/s
 
     def _paint(self) -> None:
-        """Request a repaint, coalescing bursts (drive-2 ergonomics).
-
-        Held-key navigation used to queue one full-pane Text rebuild PER key
-        event — the key rate outran the rebuilds and the cursor jumped when
-        the backlog flushed. State updates stay per-event (cheap); the pane
-        rebuild is throttled: the first request paints immediately, requests
-        inside the window mark dirty, and a trailing tick repaints, so a
-        burst always ends on a fresh frame."""
-        if self._paint_timer is not None:
-            self._paint_dirty = True
-            return
-        self._paint_now()
-        self._paint_timer = self.set_timer(self.REPAINT_INTERVAL, self._paint_tick)
-
-    def _paint_tick(self) -> None:
-        """Trailing edge of the repaint throttle: repaint if a request queued."""
-        self._paint_timer = None
-        if self._paint_dirty:
-            self._paint_dirty = False
-            self._paint_now()
-            self._paint_timer = self.set_timer(self.REPAINT_INTERVAL, self._paint_tick)
+        """Request a repaint, coalescing bursts (kit RepaintThrottle; the
+        rationale lives on cjm_substrate_tui_kit.repaint)."""
+        self._throttle.request()
 
     def _paint_now(self) -> None:
         pane = {"sources": self._paint_sources,
