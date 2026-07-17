@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.queue import JobQueue
+from cjm_substrate_tui_kit.form import ConfigForm
 from cjm_substrate_tui_kit.repaint import RepaintThrottle
 from cjm_substrate_tui_kit.viewport import tail, visible_slice
 from cjm_transcription_core.cli import expand_sources, load_capabilities
@@ -22,9 +23,9 @@ from cjm_transcription_core.models import PipelineConfig
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
-from .candidates import candidate_directives, spec_string
+from .candidates import candidate_directives, model_axis, spec_string, transcription_manifests
 from .probe import SegmentProbe
 from .sources import SourceBrowser
 from .state import save_state
@@ -54,6 +55,7 @@ class TranscriptionApp(App):
     CSS = """
     #main { height: 1fr; }
     #status { dock: bottom; height: 1; }
+    #editor { dock: bottom; height: 3; }
     """
 
     BINDINGS = [
@@ -66,6 +68,7 @@ class TranscriptionApp(App):
         Binding("backspace", "updir", "parent dir"),
         Binding("a", "key_a", "add folder / mark accuracy"),
         Binding("l", "mark_light", "mark lightweight"),
+        Binding("c", "config", "config"),
         Binding("n", "next_stage", "next stage"),
         Binding("b", "prev_stage", "back"),
         Binding("left_square_bracket", "segment(-1)", "prev segment", key_display="["),
@@ -93,6 +96,8 @@ class TranscriptionApp(App):
         for p in initial_sources or []:
             self.browser.toggle(Path(p))
         self.candidates = candidate_directives(manifests_dir)
+        # Capability code sections (config_schema source for the config sub-view)
+        self.manifest_code = transcription_manifests(manifests_dir)
         self.cand_cursor = 0
         self.cand_picked: List[int] = [i for i, c in enumerate(self.candidates)
                                        if c["default"]]
@@ -105,6 +110,12 @@ class TranscriptionApp(App):
         self.stage = "sources"
         self.busy: Optional[str] = None   # Non-None = a probe/load is in flight (message)
         self.error: Optional[str] = None
+        # Config sub-view state (keystone widget half): a focused candidate's
+        # non-model config, edited row-per-field from its manifest config_schema.
+        self.form: Optional[ConfigForm] = None
+        self.form_cand: Optional[int] = None   # candidate index the form edits
+        self.form_cursor = 0
+        self.form_editing = False              # the transient Input holds focus
         # Compare-stage state (populated by _enter_compare)
         self.manager = None
         self.queue = None
@@ -123,6 +134,11 @@ class TranscriptionApp(App):
     def compose(self) -> ComposeResult:
         yield Static(id="main")
         yield Static(id="status")
+        # Transient value-entry Input for the config sub-view's open fields
+        # (correction-TUI escape-hatch precedent); hidden until a field opens it.
+        editor = Input(id="editor")
+        editor.display = False
+        yield editor
 
     def on_mount(self) -> None:
         self._paint()
@@ -142,6 +158,7 @@ class TranscriptionApp(App):
     def _paint_now(self) -> None:
         pane = {"sources": self._paint_sources,
                 "candidates": self._paint_candidates,
+                "config": self._paint_config,
                 "compare": self._paint_compare}[self.stage]()
         self.query_one("#main", Static).update(pane)
         status = Text()
@@ -160,7 +177,10 @@ class TranscriptionApp(App):
         else:
             hints = {
                 "sources": "enter descend/toggle · a folder-source · backspace up · n next · q quit",
-                "candidates": "enter/space toggle · n compare · b back · q quit",
+                "candidates": "enter/space toggle · c config · n compare · b back · q quit",
+                "config": ("enter edit/cycle · b back to candidates · q quit"
+                           if not self.form_editing
+                           else "type a value · enter apply · escape cancel"),
                 "compare": "[ ] segment · l lightweight · a accuracy · r re-probe · enter confirm+run · b back · q quit",
             }[self.stage]
             status.append(f" {self.stage.upper()}  ·  {hints}", style="dim")
@@ -249,11 +269,66 @@ class TranscriptionApp(App):
             if c["default"]:
                 line.append("  (default)", style="dim")
             line.append(f"  -> {c['instance_id']}", style="dim")
+            # Flag a candidate carrying non-model config edits (the `c` sub-view)
+            # so tuned instances are visible in the picker, not just at run time.
+            axis = model_axis(self.manifest_code.get(c["capability"], {}))
+            axis_key = axis["key"] if axis else None
+            if any(k != axis_key for k in (c.get("config") or {})):
+                line.append("  [cfg]", style="yellow")
             line.truncate(width, overflow="ellipsis")
             out.append_text(line)
             out.append("\n")
         if below:
             out.append(f"   … {below} below\n", style="dim")
+        return out
+
+    def _paint_config(self) -> Text:
+        # One screen line per config field (row discipline); closed sets show
+        # their current value, open kinds take the transient Input. The model
+        # axis is intentionally absent — the candidates picker owns it.
+        width = max(20, self.size.width)
+        out = Text()
+        cand = self.candidates[self.form_cand] if self.form_cand is not None else {}
+        label = cand.get("model") or cand.get("capability") or "?"
+        head = Text()
+        head.append(" config · ", style="bold")
+        head.append(str(label), style="bold cyan")
+        head.append(f"  -> {cand.get('instance_id', '?')}", style="dim")
+        head.truncate(width, overflow="ellipsis")
+        out.append_text(head)
+        out.append("\n\n")
+        rows = self.form.rows() if self.form is not None else []
+        if not rows:
+            out.append("   (no configurable fields)\n", style="dim")
+            return out
+        # Reserve the two indicator lines + a trailing help line for the budget.
+        budget = max(3, max(4, self.size.height - 1) - 3)
+        start, end, above, below = visible_slice(len(rows), self.form_cursor, budget)
+        if above:
+            out.append(f"   … {above} above\n", style="dim")
+        key_w = min(24, max((len(t) for t, _, _ in rows), default=0))
+        for i in range(start, end):
+            title, value, modified = rows[i]
+            focus = (i == self.form_cursor)
+            line = Text()
+            line.append(" > " if focus else "   ", style="bold cyan" if focus else "dim")
+            line.append("*" if modified else " ", style="yellow")
+            line.append(" " + title.ljust(key_w), style="bold" if focus else "")
+            line.append("  " + value, style="bold green" if modified else
+                        ("bold" if focus else "dim"))
+            line.truncate(width, overflow="ellipsis")
+            out.append_text(line)
+            out.append("\n")
+        if below:
+            out.append(f"   … {below} below\n", style="dim")
+        # The focused field's description as a one-line help row.
+        if self.form is not None and 0 <= self.form_cursor < len(self.form.fields):
+            desc = self.form.fields[self.form_cursor].description
+            if desc:
+                help_line = Text(f"\n {desc}", style="dim")
+                help_line.truncate(width, overflow="ellipsis")
+                out.append_text(help_line)
+                out.append("\n")
         return out
 
     def _paint_compare(self) -> Text:
@@ -326,6 +401,10 @@ class TranscriptionApp(App):
             if self.candidates:
                 self.cand_cursor = max(0, min(self.cand_cursor + delta,
                                               len(self.candidates) - 1))
+        elif self.stage == "config":
+            if self.form is not None and not self.form_editing and self.form.fields:
+                self.form_cursor = max(0, min(self.form_cursor + delta,
+                                              len(self.form.fields) - 1))
         elif self.rows:
             self.row_cursor = max(0, min(self.row_cursor + delta, len(self.rows) - 1))
         self._paint()
@@ -348,7 +427,14 @@ class TranscriptionApp(App):
                     self.cand_picked.remove(self.cand_cursor)
                 else:
                     self.cand_picked.append(self.cand_cursor)
-        else:
+        elif self.stage == "config":
+            # Closed sets (enum/bool) cycle in place; open kinds hand off to the
+            # transient Input (the value-typing escape hatch).
+            if self.form is not None and self.form.fields and not self.form_editing:
+                field = self.form.fields[self.form_cursor]
+                if not field.cycle():
+                    self._open_field_editor(field)
+        elif self.stage == "compare":
             await self._confirm()
             return
         self._paint()
@@ -371,6 +457,83 @@ class TranscriptionApp(App):
         if self.stage == "compare" and self.rows and not self.busy:
             self.marks["lightweight"] = self.rows[self.row_cursor]["instance_id"]
             self._paint()
+
+    def action_config(self) -> None:
+        """Open the focused candidate's config sub-view (keystone widget half).
+
+        Builds a ConfigForm from the capability's manifest config_schema minus
+        its model axis (the candidates picker owns that), seeded with any config
+        already on the directive, and switches to the config stage. A capability
+        with no configurable fields surfaces a message and stays put."""
+        if self.busy or self.stage != "candidates" or not self.candidates:
+            return
+        cand = self.candidates[self.cand_cursor]
+        code = self.manifest_code.get(cand["capability"], {})
+        axis = model_axis(code)
+        skip = (axis["key"],) if axis else ()
+        form = ConfigForm.from_schema(code.get("config_schema"), skip=skip)
+        if not form.fields:
+            self.error = f"{cand['capability']} has no configurable fields"
+            self._paint()
+            return
+        form.apply(cand.get("config") or {})   # seed prior edits (axis key ignored)
+        self.form = form
+        self.form_cand = self.cand_cursor
+        self.form_cursor = 0
+        self.error = None
+        self.stage = "config"
+        self._paint()
+
+    def _open_field_editor(self, field) -> None:
+        """Show the transient Input primed with a field's current value."""
+        editor = self.query_one("#editor", Input)
+        editor.value = field.render()
+        editor.display = True
+        editor.focus()
+        self.form_editing = True
+
+    def _close_field_editor(self) -> None:
+        editor = self.query_one("#editor", Input)
+        editor.display = False
+        editor.value = ""
+        self.set_focus(None)
+        self.form_editing = False
+
+    async def on_input_submitted(self, event) -> None:
+        """Apply a typed value to the focused field (enter in the Input).
+
+        A parse failure keeps the Input open with a row-paintable reason (the
+        ratified escape-hatch contract: failures leave the value untouched)."""
+        if self.form is None or not self.form_editing:
+            return
+        field = self.form.fields[self.form_cursor]
+        try:
+            field.parse(event.value)
+        except ValueError as e:
+            self.error = f"{field.title}: {e}"
+            self._paint()
+            return
+        self.error = None
+        self._close_field_editor()
+        self._paint()
+
+    def _commit_form(self) -> None:
+        """Merge the form's overrides back onto the candidate directive.
+
+        The model-axis entry (owned by the picker) is preserved; every other
+        non-default value lands in the directive config, so spec_string carries
+        it into the confirmed hand-off unchanged."""
+        if self.form is None or self.form_cand is None:
+            return
+        cand = self.candidates[self.form_cand]
+        code = self.manifest_code.get(cand["capability"], {})
+        axis = model_axis(code)
+        cfg = cand.get("config") or {}
+        axis_part = ({axis["key"]: cfg[axis["key"]]}
+                     if axis and axis["key"] in cfg else {})
+        cand["config"] = {**axis_part, **self.form.overrides()}
+        self.form = None
+        self.form_cand = None
 
     async def action_next_stage(self) -> None:
         if self.busy:
@@ -398,6 +561,10 @@ class TranscriptionApp(App):
             # Re-entering the browser is the one moment external changes
             # (new recordings) should show up — navigation itself stays cached.
             self.browser.refresh()
+        elif self.stage == "config":
+            # Adopt the edits onto the directive, then return to the picker.
+            self._commit_form()
+            self.stage = "candidates"
         elif self.stage == "compare":
             # Switch stages IMMEDIATELY — the serial model unloads were the
             # felt delay (drive-2) — and tear the stack down in the background.
@@ -416,6 +583,12 @@ class TranscriptionApp(App):
             self.run_worker(self._run_compare(), exclusive=True)
 
     async def action_cancel_probe(self) -> None:
+        # Escape also backs out of the config value-entry Input (no apply).
+        if self.form_editing:
+            self.error = None
+            self._close_field_editor()
+            self._paint()
+            return
         if self.probe is not None and self.busy:
             await self.probe.cancel_active()
 

@@ -13,8 +13,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from textual.widgets import Static
+from textual.widgets import Input, Static
 from cjm_transcription_tui.app import TranscriptionApp
+from cjm_transcription_tui.candidates import spec_string
 
 
 async def drive(start_dir: Path, manifests_dir: str) -> None:
@@ -71,6 +72,7 @@ def main() -> None:
         mcopy = Path(td) / "manifests"
         shutil.copytree(manifests_dir, mcopy)
         asyncio.run(drive(media, str(mcopy)))
+        asyncio.run(drive_config(media, str(mcopy)))
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         for i in range(60):
@@ -115,7 +117,81 @@ async def drive_windowing(start_dir: Path) -> None:
     print("pilot OK: viewport windowing, wheel scroll, one-line rows, coalesced flush")
 
 
-# Entry point (kept LAST: regions append in order, and the dispatch must
-# follow every driver it names).
+# ---- config sub-view driver (keystone widget half) ----
+
+
+async def drive_config(start_dir: Path, manifests_dir: str) -> None:
+    """The keystone config sub-view: a focused candidate's config_schema becomes
+    editable rows (model axis excluded), closed sets cycle, open kinds take the
+    transient Input, and overrides commit onto the directive + round-trip through
+    spec_string to the headless grammar (the voxtral-small device=cpu case)."""
+    app = TranscriptionApp(manifests_dir, start_dir=str(start_dir))
+    async with app.run_test() as pilot:
+        def paint() -> str:
+            app._paint_now()
+            return str(app.query_one("#main", Static).render())
+
+        await pilot.press("enter")     # select ep1.mp3
+        await pilot.press("n")         # -> candidates
+        widx = next(i for i, c in enumerate(app.candidates)
+                    if c["capability"] == "cjm-capability-whisper")
+        for _ in range(widx):
+            app.action_move(1)
+
+        await pilot.press("c")         # -> config
+        assert app.stage == "config", app.stage
+        assert "config ·" in paint()
+        keys = [f.key for f in app.form.fields]
+        assert "model" not in keys and "device" in keys, keys   # axis excluded
+
+        di = keys.index("device")
+        for _ in range(di):
+            await pilot.press("j")
+        await pilot.press("enter")     # closed set cycles: auto -> cpu
+        assert app.form.field("device").value == "cpu"
+        body = paint()
+        assert "cpu" in body and "*" in body, body[:400]
+
+        ti = keys.index("temperature")
+        while app.form_cursor < ti:
+            await pilot.press("j")
+        await pilot.press("enter")     # open kind -> transient Input
+        assert app.form_editing and app.query_one("#editor", Input).display
+        app.query_one("#editor", Input).value = "9.9"
+        await pilot.press("enter")     # out of bounds: Input stays open, reason painted
+        assert app.form_editing and app.error and "Temperature" in app.error, app.error
+        app.query_one("#editor", Input).value = "0.4"
+        await pilot.press("enter")     # in bounds: applies + closes
+        assert not app.form_editing and app.form.field("temperature").value == 0.4
+
+        bi = keys.index("beam_size")
+        while app.form_cursor < bi:
+            await pilot.press("j")
+        await pilot.press("enter")
+        app.query_one("#editor", Input).value = "9"
+        await pilot.press("escape")    # escape-cancel: no apply
+        assert not app.form_editing and app.form.field("beam_size").value == 5
+
+        await pilot.press("b")         # commit onto the directive, back to picker
+        assert app.stage == "candidates"
+        cfg = app.candidates[widx]["config"]
+        assert cfg.get("device") == "cpu" and cfg.get("temperature") == 0.4
+        assert "beam_size" not in cfg
+        assert "[cfg]" in paint()      # picker flags the tuned candidate
+        spec = spec_string(app.candidates[widx])
+        assert "device=cpu" in spec and "temperature=0.4" in spec, spec
+
+        await pilot.press("c")         # re-entry re-seeds the edited values
+        assert app.form.field("device").value == "cpu"
+        assert app.form.field("temperature").value == 0.4
+        await pilot.press("b")
+        await pilot.press("q")
+    assert app.return_value is None
+    print("pilot OK: config sub-view — schema rows, cycle, Input parse/validate,"
+          " escape-cancel, overrides commit + spec round-trip, re-seed")
+
+
+# Entry-point dispatch — LAST region on purpose (main names every driver above,
+# so the __main__ call must follow their definitions).
 if __name__ == "__main__":
     main()
