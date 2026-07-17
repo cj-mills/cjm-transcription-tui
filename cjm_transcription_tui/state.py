@@ -6,9 +6,10 @@ directory) must never need retyping. The file lives NEXT TO the manifests dir
 (one level up — .cjm/ in practice) so state is per-project, not per-user.
 """
 
-import json
 from pathlib import Path
 from typing import Any, Dict
+
+from cjm_substrate_tui_kit.state import SidecarState
 
 STATE_BASENAME = "transcription-tui-state.json"
 
@@ -24,10 +25,7 @@ def load_state(
     manifests_dir: str,  # Capability manifests directory (the state key)
 ) -> Dict[str, Any]:  # Persisted state ({} when absent/unreadable — never raises)
     """Read this project's persisted TUI state."""
-    try:
-        return json.loads(state_path(manifests_dir).read_text())
-    except (OSError, ValueError):
-        return {}
+    return SidecarState(state_path(manifests_dir)).load()
 
 
 def save_state(
@@ -36,10 +34,4 @@ def save_state(
 ) -> Dict[str, Any]:  # The merged state as written
     """Merge updates into the persisted state and write it back (best-effort:
     a read-only location must not break the run hand-off)."""
-    state = load_state(manifests_dir)
-    state.update(updates)
-    try:
-        state_path(manifests_dir).write_text(json.dumps(state, indent=2) + "\n")
-    except OSError:
-        pass
-    return state
+    return SidecarState(state_path(manifests_dir)).save(**updates)
