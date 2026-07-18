@@ -10,6 +10,8 @@ would MarkupError), AUTO_FOCUS None so bindings own the keys.
 """
 
 import asyncio
+import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -611,7 +613,10 @@ class TranscriptionApp(App):
             return
         try:
             if self.player is None:
-                self.player = ChunkPlayer()
+                with _quiet_fd2():
+                    # PortAudio/ALSA probe chatter prints to fd 2 and stamps
+                    # over the paint in app mode (drive finding 2026-07-17).
+                    self.player = ChunkPlayer()
             seg = self.probe.raw_segments[self.seg_index]
             self.player.play(load_chunk(wav, 0.0, float(seg.duration)))
         except Exception as e:
@@ -847,3 +852,21 @@ class TranscriptionApp(App):
         }
         await self._teardown_stack()
         self.exit(plan)
+
+
+@contextmanager
+def _quiet_fd2():
+    """Silence C-level stderr (PortAudio/ALSA device-probe chatter) in a scope.
+
+    Library chatter lands on fd 2 directly — Textual cannot intercept it, so in
+    app mode it stamps raw text over the paint (drive finding 2026-07-17: the
+    ALSA paInvalidSampleRate probe lines flashed across the compare pane when
+    the player first opened). Exceptions still propagate; only the fd is muted."""
+    saved = os.dup(2)
+    try:
+        with open(os.devnull, "wb") as null:
+            os.dup2(null.fileno(), 2)
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
