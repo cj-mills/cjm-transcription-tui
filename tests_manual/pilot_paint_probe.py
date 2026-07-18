@@ -207,6 +207,7 @@ async def drive_results(start_dir: Path, manifests_dir: str, runs_dir: Path) -> 
     wav = runs_dir / "seg0000.wav"  # a REAL model-input WAV for the p gesture
     sf.write(str(wav), np.zeros(3200, dtype="float32"), 16000)
     (runs_dir / "run_x.json").write_text(json.dumps({
+        "format": "cjm-transcription-core/run-manifest",
         "run_id": "run_x", "created_at": 100.0,
         "config": {"transcriber_capabilities": ["cjm-capability-whisper"]},
         "sources": [{"source_path": str(src), "content_hash": digest,

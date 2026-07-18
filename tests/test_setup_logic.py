@@ -236,6 +236,7 @@ def test_run_index(tmp_path):
     runs = tmp_path / "runs"
     runs.mkdir()
     (runs / "run_a.json").write_text(json.dumps({
+        "format": "cjm-transcription-core/run-manifest",
         "run_id": "run_a", "created_at": 100.0,
         "config": {"transcriber_capabilities": ["cjm-capability-whisper"]},
         "sources": [{"source_path": str(src), "content_hash": digest,
@@ -244,6 +245,7 @@ def test_run_index(tmp_path):
                                                    {"text": "hello"}}}]}]}))
     # newer run references the SAME CONTENT under a different (moved) path
     (runs / "run_b.json").write_text(json.dumps({
+        "format": "cjm-transcription-core/run-manifest",
         "run_id": "run_b", "created_at": 200.0,
         "config": {"transcriber_capabilities": ["cjm-capability-voxtral-hf"]},
         "sources": [{"source_path": str(tmp_path / "elsewhere.mp3"),
@@ -251,6 +253,11 @@ def test_run_index(tmp_path):
                      "segments": [{"index": 0, "text": "old flat schema"}]}]}))
     (runs / "not-a-manifest.json").write_text("{broken")   # skipped, never raises
     (runs / "foreign.json").write_text(json.dumps({"x": 1}))  # foreign json skipped
+    # decomp manifests share the runs/ dir and MATCH the run_id+sources shape —
+    # only the format tag keeps them out of the transcription list (5329fbd8)
+    (runs / "decomp_z.json").write_text(json.dumps({
+        "format": "cjm-transcript-decomp-core/run-manifest",
+        "run_id": "decomp_z", "created_at": 300.0, "sources": []}))
 
     idx = RunIndex(str(runs))
     assert idx.load() == 2

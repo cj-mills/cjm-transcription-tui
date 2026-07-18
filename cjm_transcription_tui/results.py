@@ -48,6 +48,11 @@ class RunIndex:
             if not (isinstance(m, dict) and m.get("run_id")
                     and isinstance(m.get("sources"), list)):
                 continue  # foreign json in the runs dir — not ours
+            if "transcription-core" not in str(m.get("format", "")):
+                # BOTH cores write run_id+sources manifests into the same
+                # runs/ default — the format tag is what separates a
+                # transcription run from a decomp run (finding 5329fbd8).
+                continue
             m["_path"] = str(f)
             rows.append(m)
         rows.sort(key=lambda m: float(m.get("created_at") or 0.0), reverse=True)
