@@ -11,7 +11,7 @@ probe itself has seeded samples, so the "lightweight" judgment gets numbers.
 """
 
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from cjm_transcription_core.boundaries import compute_segment_boundaries
 from cjm_transcription_core.pipeline import (analyze_vad, build_segment_composition,
@@ -45,6 +45,7 @@ class SegmentProbe:
         self.raw_segments: List[Any] = []
         self.duration = 0.0
         self._rows: Dict[int, List[Dict[str, Any]]] = {}
+        self._wavs: Dict[int, str] = {}  # segment index -> model-input WAV (playback)
         self.active_comp_id = None  # In-flight probe composition (escape-cancel target)
 
     async def prepare(self) -> int:  # Segment count after cutting
@@ -62,6 +63,10 @@ class SegmentProbe:
         self.raw_segments, _ = await cut_segments(self.queue, self.cfg.ffmpeg_capability,
                                                   self.source_path, boundaries)
         return len(self.raw_segments)
+
+    def wav_path(self, index: int) -> Optional[str]:
+        """The i-th segment's model-input WAV, once compare(i) has folded records."""
+        return self._wavs.get(index)
 
     def profile(self, instance_id: str) -> Dict[str, Any]:
         """The instance's CR-7 empirical record fields worth showing (may be {})."""
@@ -114,6 +119,10 @@ class SegmentProbe:
             self.active_comp_id = None
         records = records_from_composition(crun, metas)
         rec = records[0] if records else None
+        if rec is not None and rec.model_input_path:
+            # What the candidates heard — the playback source (kit ChunkPlayer
+            # plays this, not the source media; correction-TUI principle).
+            self._wavs[index] = rec.model_input_path
         rows: List[Dict[str, Any]] = []
         for tid in self.transcriber_ids:
             tr = (rec.transcripts.get(tid) if rec is not None else None) or {}

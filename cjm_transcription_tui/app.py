@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.queue import JobQueue
+from cjm_substrate_tui_kit.audio import ChunkPlayer, load_chunk
 from cjm_substrate_tui_kit.form import ConfigForm
 from cjm_substrate_tui_kit.repaint import RepaintThrottle
 from cjm_substrate_tui_kit.viewport import tail, visible_slice
@@ -74,6 +75,7 @@ class TranscriptionApp(App):
         Binding("left_square_bracket", "segment(-1)", "prev segment", key_display="["),
         Binding("right_square_bracket", "segment(1)", "next segment", key_display="]"),
         Binding("r", "rerun", "re-probe segment"),
+        Binding("p", "play", "play/stop segment"),
         Binding("escape", "cancel_probe", "cancel probe", show=False, priority=True),
         Binding("q", "quit_app", "quit"),
     ]
@@ -126,6 +128,9 @@ class TranscriptionApp(App):
         self.rows: List[Dict[str, Any]] = []
         self.row_cursor = 0
         self.marks: Dict[str, Optional[str]] = {"lightweight": None, "accuracy": None}
+        # Manual segment playback (kit ChunkPlayer; created lazily on first p —
+        # keeps envs without a PortAudio device usable, error surfaced in-status).
+        self.player: Optional[ChunkPlayer] = None
         # Repaint coalescing (kit RepaintThrottle) + background-unload state
         self._throttle = RepaintThrottle(self._paint_now, self.set_timer,
                                          self.REPAINT_INTERVAL)
@@ -181,7 +186,7 @@ class TranscriptionApp(App):
                 "config": ("enter edit/cycle · b back to candidates · q quit"
                            if not self.form_editing
                            else "type a value · enter apply · escape cancel"),
-                "compare": "[ ] segment · l lightweight · a accuracy · r re-probe · enter confirm+run · b back · q quit",
+                "compare": "[ ] segment · p play · l lightweight · a accuracy · r re-probe · enter confirm+run · b back · q quit",
             }[self.stage]
             status.append(f" {self.stage.upper()}  ·  {hints}", style="dim")
         # The one-line dock cannot wrap — long busy/error strings truncated
@@ -566,6 +571,8 @@ class TranscriptionApp(App):
             self._commit_form()
             self.stage = "candidates"
         elif self.stage == "compare":
+            if self.player is not None:
+                self.player.stop()
             # Switch stages IMMEDIATELY — the serial model unloads were the
             # felt delay (drive-2) — and tear the stack down in the background.
             self._teardown_in_background()
@@ -575,12 +582,41 @@ class TranscriptionApp(App):
     def action_segment(self, delta: int) -> None:
         if self.stage == "compare" and self.seg_count and not self.busy:
             self.seg_index = max(0, min(self.seg_index + delta, self.seg_count - 1))
+            if self.player is not None:
+                # Walking segments silences the old one — stale audio under a
+                # fresh comparison would mismatch the transcript on screen.
+                self.player.stop()
             self.run_worker(self._run_compare(), exclusive=True)
 
     def action_rerun(self) -> None:
         if self.stage == "compare" and self.probe is not None and not self.busy:
             self.probe._rows.pop(self.seg_index, None)
             self.run_worker(self._run_compare(), exclusive=True)
+
+    def action_play(self) -> None:
+        """Play/stop the focused segment's model-input WAV (manual trigger, NOT
+        autoplay — aafce2c6 component (b)). The operator hears exactly what the
+        candidates heard, background music included, so the demucs judgment and
+        the transcript comparison share one referent. p toggles: press again to
+        cut playback mid-segment."""
+        if self.stage != "compare" or self.probe is None:
+            return
+        if self.player is not None and self.player.playing:
+            self.player.stop()
+            return
+        wav = self.probe.wav_path(self.seg_index)
+        if wav is None:
+            self.error = "no probed audio for this segment yet"
+            self._paint()
+            return
+        try:
+            if self.player is None:
+                self.player = ChunkPlayer()
+            seg = self.probe.raw_segments[self.seg_index]
+            self.player.play(load_chunk(wav, 0.0, float(seg.duration)))
+        except Exception as e:
+            self.error = f"playback unavailable: {e}"
+            self._paint()
 
     async def action_cancel_probe(self) -> None:
         # Escape also backs out of the config value-entry Input (no apply).
@@ -598,6 +634,9 @@ class TranscriptionApp(App):
         # 2026-07-16), so quitting mid-browse lost the place. The confirm
         # path still saves the full settings payload via the CLI.
         save_state(self.manifests_dir, last_cwd=str(self.browser.cwd))
+        if self.player is not None:
+            self.player.close()
+            self.player = None
         await self._teardown_stack()
         self.exit(None)
 
