@@ -109,6 +109,7 @@ def main() -> int:  # Console-script entry point (cjm-transcription-tui)
                            graph_capability=graph_capability,
                            graph_db_path=graph_db_path,
                            initial_picks=state.get("picked_instance_ids"),
+                           initial_bookmarks=state.get("bookmarks"),
                            preprocessing_capability=(
                                args.preprocessing_capability
                                or discover_capability(args.manifests_dir,

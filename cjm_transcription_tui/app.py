@@ -11,6 +11,7 @@ would MarkupError), AUTO_FOCUS None so bindings own the keys.
 
 import asyncio
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -30,6 +31,7 @@ from textual.widgets import Input, Static
 
 from .candidates import candidate_directives, model_axis, spec_string, transcription_manifests
 from .probe import SegmentProbe
+from .results import RunIndex
 from .sources import SourceBrowser
 from .state import save_state
 
@@ -79,6 +81,10 @@ class TranscriptionApp(App):
         Binding("r", "rerun", "re-probe segment"),
         Binding("p", "play", "play/stop segment"),
         Binding("d", "preprocess", "preprocessing A/B"),
+        Binding("v", "results", "past runs", show=False),
+        Binding("h", "hash_check", "hash-check source", show=False),
+        Binding("m", "bookmark", "bookmark directory", show=False),
+        Binding("apostrophe", "jump_bookmark", "jump bookmark", show=False),
         Binding("escape", "cancel_probe", "cancel probe", show=False, priority=True),
         Binding("q", "quit_app", "quit"),
     ]
@@ -91,6 +97,8 @@ class TranscriptionApp(App):
                  graph_db_path: Optional[str] = None,          # Caller-wins graph db override
                  initial_picks: Optional[List[str]] = None,    # Persisted candidate instance ids
                  preprocessing_capability: Optional[str] = None,  # source_separation capability for the d A/B (None = axis hidden)
+                 initial_bookmarks: Optional[List[str]] = None,   # Persisted directory bookmarks (sidecar state)
+                 runs_dir: str = "runs",                 # Run-manifest dir (the core CLI's cwd-relative default)
                  max_segment_duration: float = 220.0):   # Segment wall-clock cap (probe + plan)
         super().__init__()
         self.manifests_dir = manifests_dir
@@ -139,6 +147,16 @@ class TranscriptionApp(App):
         # toggle of a stack — an unused axis never pays the model load.
         self.preprocessing_capability = preprocessing_capability
         self.preprocess_loaded = False
+        # Results layer (6768bafb): the core's OWN run manifests, read not
+        # written; counts rebuilt on mount / v-entry, never during browse.
+        self.run_index = RunIndex(runs_dir)
+        self._run_counts: Dict[str, int] = {}
+        self.results_run: Optional[int] = None  # None = runs list; else drilled run index
+        self.results_cursor = 0                 # Cursor in the runs list
+        self.results_src = 0                    # Focused source inside a drilled run
+        self.results_seg = 0                    # Focused segment of that source
+        self.bookmarks: List[str] = list(initial_bookmarks or [])
+        self.notice: Optional[str] = None  # Sticky info line (hash-check, bookmarks)
         # Repaint coalescing (kit RepaintThrottle) + background-unload state
         self._throttle = RepaintThrottle(self._paint_now, self.set_timer,
                                          self.REPAINT_INTERVAL)
@@ -154,6 +172,8 @@ class TranscriptionApp(App):
         yield editor
 
     def on_mount(self) -> None:
+        self.run_index.load()
+        self._run_counts = self.run_index.counts_by_path()
         self._paint()
 
     def on_resize(self, event) -> None:
@@ -172,7 +192,8 @@ class TranscriptionApp(App):
         pane = {"sources": self._paint_sources,
                 "candidates": self._paint_candidates,
                 "config": self._paint_config,
-                "compare": self._paint_compare}[self.stage]()
+                "compare": self._paint_compare,
+                "results": self._paint_results}[self.stage]()
         self.query_one("#main", Static).update(pane)
         status = Text()
         # The journal chip is ALWAYS visible (drive-1: an unjournaled run must
@@ -187,14 +208,19 @@ class TranscriptionApp(App):
             status.append(f" {self.error} ", style="bold red")
         elif self.busy:
             status.append(f" {self.busy} ", style="yellow")
+        elif self.notice:
+            status.append(f" {self.notice} ", style="cyan")
         else:
             hints = {
-                "sources": "enter descend/toggle · a folder-source · backspace up · n next · q quit",
+                "sources": "enter descend/toggle · a folder-source · v runs · h hash · m/' bookmark · backspace up · n next · q quit",
                 "candidates": "enter/space toggle · c config · n compare · b back · q quit",
                 "config": ("enter edit/cycle · b back to candidates · q quit"
                            if not self.form_editing
                            else "type a value · enter apply · escape cancel"),
                 "compare": "[ ] segment · p play · d preprocess · l lightweight · a accuracy · r re-probe · enter confirm+run · b back · q quit",
+                "results": ("enter open run · j/k walk · b back · q quit"
+                            if self.results_run is None
+                            else "j/k source · [ ] segment · b runs list · q quit"),
             }[self.stage]
             status.append(f" {self.stage.upper()}  ·  {hints}", style="dim")
         # The one-line dock cannot wrap — long busy/error strings truncated
@@ -210,7 +236,12 @@ class TranscriptionApp(App):
         # hold to one; prose regions like transcripts still wrap by design).
         width = max(20, self.size.width)
         out = Text()
-        out.append(f" {tail(str(self.browser.cwd), width - 1)}\n", style="bold")
+        cwd_line = Text()
+        cwd_line.append(f" {tail(str(self.browser.cwd), width - 3)}", style="bold")
+        if str(self.browser.cwd) in self.bookmarks:
+            cwd_line.append(" ★", style="yellow")
+        out.append_text(cwd_line)
+        out.append("\n")
         rows = self.browser.entries()
         self.browser.cursor = max(0, min(self.browser.cursor, max(0, len(rows) - 1)))
         # Cursor-windowed listing (drive-2: long directories ran off-screen).
@@ -234,6 +265,14 @@ class TranscriptionApp(App):
             line.append("[x] " if picked else "[ ] ", style="green" if picked else "dim")
             name = entry.name + ("/" if entry.is_dir() else "")
             line.append(name, style="bold" if focus else ("" if entry.is_file() else "blue"))
+            if entry.is_dir() and keys[i] in self.bookmarks:
+                line.append(" ★", style="yellow")
+            # Prior-run chip (6768bafb b): path-keyed count, NO hashing during
+            # browse — h is the content-truth check for renames/moves.
+            n = (RunIndex.dir_count(self._run_counts, keys[i]) if entry.is_dir()
+                 else self._run_counts.get(keys[i], 0))
+            if n:
+                line.append(f"  ·{n} run{'s' if n != 1 else ''}", style="dim cyan")
             line.truncate(width, overflow="ellipsis")
             out.append_text(line)
             out.append("\n")
@@ -409,6 +448,95 @@ class TranscriptionApp(App):
             out.append("\n")
         return out
 
+    def _paint_results(self) -> Text:
+        """Past runs (6768bafb a): list newest-first; enter drills into a run —
+        the compare pane's mental model reused (rows above, focused text below,
+        [ ] walks segments of the focused source)."""
+        width = max(20, self.size.width)
+        out = Text()
+        runs = self.run_index.runs
+        if self.results_run is None:
+            out.append(f" Past runs ({len(runs)})  ·  {self.run_index.runs_dir}/\n\n",
+                       style="bold")
+            if not runs:
+                out.append("   (no run manifests found — confirmed runs land here)\n",
+                           style="dim")
+            budget = max(3, max(4, self.size.height - 1) - 4)
+            start, end, above, below = visible_slice(len(runs), self.results_cursor,
+                                                     budget)
+            if above:
+                out.append(f"   … {above} above\n", style="dim")
+            for i in range(start, end):
+                m = runs[i]
+                focus = (i == self.results_cursor)
+                line = Text()
+                line.append(" > " if focus else "   ",
+                            style="bold cyan" if focus else "dim")
+                when = time.strftime("%Y-%m-%d %H:%M",
+                                     time.localtime(float(m.get("created_at") or 0)))
+                line.append(str(m["run_id"]), style="bold" if focus else "")
+                line.append(f"  {when}  {len(m['sources'])} source(s)", style="dim")
+                names = self.run_index.transcribers(m)
+                if names:
+                    line.append("  " + ", ".join(names), style="dim")
+                line.truncate(width, overflow="ellipsis")
+                out.append_text(line)
+                out.append("\n")
+            if below:
+                out.append(f"   … {below} below\n", style="dim")
+            return out
+        m = runs[self.results_run]
+        srcs = m["sources"]
+        header = Text()
+        header.append(f" {m['run_id']}", style="bold")
+        names = self.run_index.transcribers(m)
+        if names:
+            header.append("   " + ", ".join(names), style="dim")
+        header.truncate(width, overflow="ellipsis")
+        out.append_text(header)
+        out.append("\n\n")
+        row_budget = max(3, (max(4, self.size.height - 1) - 4) // 2)
+        start, end, above, below = visible_slice(len(srcs), self.results_src,
+                                                 row_budget)
+        if above:
+            out.append(f"   … {above} above\n", style="dim")
+        for i in range(start, end):
+            s = srcs[i]
+            focus = (i == self.results_src)
+            segs = s.get("segments") or []
+            line = Text()
+            line.append(" > " if focus else "   ",
+                        style="bold cyan" if focus else "dim")
+            line.append(Path(s.get("source_path") or "?").name,
+                        style="bold" if focus else "")
+            line.append(f"  {len(segs)} segment(s)", style="dim")
+            if s.get("chain"):
+                line.append("  " + "->".join(s["chain"]), style="dim cyan")
+            line.truncate(width, overflow="ellipsis")
+            out.append_text(line)
+            out.append("\n")
+        if below:
+            out.append(f"   … {below} below\n", style="dim")
+        if srcs and 0 <= self.results_src < len(srcs):
+            segs = srcs[self.results_src].get("segments") or []
+            if segs:
+                self.results_seg = max(0, min(self.results_seg, len(segs) - 1))
+                seg = segs[self.results_seg]
+                out.append(f"\n segment {self.results_seg + 1}/{len(segs)}"
+                           f"  [{float(seg.get('start') or 0):.1f}s – "
+                           f"{float(seg.get('end') or 0):.1f}s]\n", style="bold")
+                texts = seg.get("transcripts")
+                if isinstance(texts, dict) and texts:
+                    for tid, rec in texts.items():
+                        out.append(f"\n {tid}\n", style="cyan")
+                        out.append((rec or {}).get("text") or "(empty)")
+                        out.append("\n")
+                else:  # manifest schema 0.1.x: one flat text per segment
+                    out.append("\n")
+                    out.append(seg.get("text") or "(empty transcript)")
+                    out.append("\n")
+        return out
+
     # ---- stage actions (single key vocabulary, stage-dispatched) ----
 
     def action_move(self, delta: int) -> None:
@@ -424,6 +552,18 @@ class TranscriptionApp(App):
             if self.form is not None and not self.form_editing and self.form.fields:
                 self.form_cursor = max(0, min(self.form_cursor + delta,
                                               len(self.form.fields) - 1))
+        elif self.stage == "results":
+            runs = self.run_index.runs
+            if self.results_run is None:
+                if runs:
+                    self.results_cursor = max(0, min(self.results_cursor + delta,
+                                                     len(runs) - 1))
+            else:
+                srcs = runs[self.results_run]["sources"]
+                if srcs:
+                    self.results_src = max(0, min(self.results_src + delta,
+                                                  len(srcs) - 1))
+                    self.results_seg = 0
         elif self.rows:
             self.row_cursor = max(0, min(self.row_cursor + delta, len(self.rows) - 1))
         self._paint()
@@ -453,6 +593,11 @@ class TranscriptionApp(App):
                 field = self.form.fields[self.form_cursor]
                 if not field.cycle():
                     self._open_field_editor(field)
+        elif self.stage == "results":
+            if self.results_run is None and self.run_index.runs:
+                self.results_run = self.results_cursor
+                self.results_src = 0
+                self.results_seg = 0
         elif self.stage == "compare":
             await self._confirm()
             return
@@ -591,9 +736,24 @@ class TranscriptionApp(App):
             # felt delay (drive-2) — and tear the stack down in the background.
             self._teardown_in_background()
             self.stage = "candidates"
+        elif self.stage == "results":
+            if self.results_run is not None:
+                self.results_run = None  # drilled run -> back to the runs list
+            else:
+                self.stage = "sources"
+                self.browser.refresh()
         self._paint()
 
     def action_segment(self, delta: int) -> None:
+        if self.stage == "results" and self.results_run is not None:
+            m = self.run_index.runs[self.results_run]
+            srcs = m["sources"]
+            segs = (srcs[self.results_src].get("segments") or []) if srcs else []
+            if segs:
+                self.results_seg = max(0, min(self.results_seg + delta,
+                                              len(segs) - 1))
+                self._paint()
+            return
         if self.stage == "compare" and self.seg_count and not self.busy:
             self.seg_index = max(0, min(self.seg_index + delta, self.seg_count - 1))
             if self.player is not None:
@@ -639,6 +799,91 @@ class TranscriptionApp(App):
         if self.player is not None:
             self.player.stop()  # the audible referent just changed renditions
         self.run_worker(self._run_compare(), exclusive=True)
+
+    def action_results(self) -> None:
+        """Open the past-runs view (v, sources stage): re-reads the manifests so
+        a run that just finished in another terminal shows without a restart."""
+        if self.stage != "sources" or self.busy:
+            return
+        self.notice = None
+        self.error = None
+        self.run_index.load()
+        self._run_counts = self.run_index.counts_by_path()
+        self.results_run = None
+        self.results_cursor = 0
+        self.stage = "results"
+        self._paint()
+
+    async def action_hash_check(self) -> None:
+        """Content-identity check on the focused file (h, 6768bafb c): hash with
+        the substrate's hash_file and match run manifests — catches the renamed/
+        moved/duplicated sources the path-keyed chips miss (content hash IS the
+        Source identity; drive-1 follow-up). Hashing rides to_thread so a large
+        file never freezes paint."""
+        if self.stage != "sources" or self.busy:
+            return
+        target = self.browser.focused()
+        if target is None or target.is_dir():
+            self.error = "focus a file to hash-check"
+            self._paint()
+            return
+        self.notice = None
+        self.error = None
+        self.busy = f"hashing {target.name}..."
+        self._paint()
+        try:
+            res = await asyncio.to_thread(self.run_index.hash_check, str(target))
+        except OSError as e:
+            self.busy = None
+            self.error = f"hash-check failed: {e}"
+            self._paint()
+            return
+        self.busy = None
+        matches = res["matches"]
+        if not matches:
+            self.notice = f"{target.name}: no prior run of this content"
+        else:
+            here = str(target.resolve())
+            moved = sum(1 for hit in matches
+                        if str(Path(hit["source_path"]).resolve()) != here)
+            note = f", {moved} under a different path" if moved else ""
+            self.notice = (f"{target.name}: content in {len(matches)} prior "
+                           f"run(s){note} — latest {matches[0]['run_id']}")
+        self._paint()
+
+    def action_bookmark(self) -> None:
+        """Toggle a directory bookmark on the browser cwd (m, 6768bafb d);
+        persisted to the sidecar immediately so ANY exit path keeps it."""
+        if self.stage != "sources":
+            return
+        key = str(self.browser.cwd)
+        if key in self.bookmarks:
+            self.bookmarks.remove(key)
+            self.notice = f"bookmark removed: {tail(key, 60)}"
+        else:
+            self.bookmarks.append(key)
+            self.notice = f"bookmarked ★ {tail(key, 60)}"
+        save_state(self.manifests_dir, bookmarks=self.bookmarks)
+        self._paint()
+
+    def action_jump_bookmark(self) -> None:
+        """Cycle the browser through bookmarked directories (' — the
+        cross-session fast path between library roots)."""
+        if self.stage != "sources" or not self.bookmarks:
+            return
+        cur = str(self.browser.cwd)
+        order = sorted(self.bookmarks)
+        nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else order[0]
+        target = Path(nxt)
+        if not target.is_dir():
+            self.notice = f"bookmark missing on disk: {tail(nxt, 60)}"
+            self._paint()
+            return
+        self.browser.cwd = target
+        self.browser.cursor = 0
+        self.browser.refresh()
+        self.notice = None
+        self._paint()
 
     def action_play(self) -> None:
         """Play/stop the focused segment's model-input WAV (manual trigger, NOT

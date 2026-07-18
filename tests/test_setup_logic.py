@@ -219,3 +219,50 @@ def test_tail_clamps_keeping_the_end():
     assert tail("abcdef", 5) == "…cdef"               # ellipsis counts against width
     assert tail("abcdef", 1) == "…"
     assert tail("abcdef", 0) == ""
+
+
+def test_run_index(tmp_path):
+    # RunIndex (6768bafb): tolerant load + newest-first order, path-keyed
+    # counts (browse chips), dir prefix counts, content-identity hash-check
+    from cjm_substrate.utils.hashing import hash_file
+    from cjm_transcription_tui.results import RunIndex
+
+    media = tmp_path / "library"
+    media.mkdir()
+    src = media / "ep1.mp3"
+    src.write_bytes(b"the-audio-bytes")
+    digest = hash_file(str(src))
+
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "run_a.json").write_text(json.dumps({
+        "run_id": "run_a", "created_at": 100.0,
+        "config": {"transcriber_capabilities": ["cjm-capability-whisper"]},
+        "sources": [{"source_path": str(src), "content_hash": digest,
+                     "segments": [{"index": 0, "start": 0.0, "end": 1.0,
+                                   "transcripts": {"cjm-capability-whisper":
+                                                   {"text": "hello"}}}]}]}))
+    # newer run references the SAME CONTENT under a different (moved) path
+    (runs / "run_b.json").write_text(json.dumps({
+        "run_id": "run_b", "created_at": 200.0,
+        "config": {"transcriber_capabilities": ["cjm-capability-voxtral-hf"]},
+        "sources": [{"source_path": str(tmp_path / "elsewhere.mp3"),
+                     "content_hash": digest,
+                     "segments": [{"index": 0, "text": "old flat schema"}]}]}))
+    (runs / "not-a-manifest.json").write_text("{broken")   # skipped, never raises
+    (runs / "foreign.json").write_text(json.dumps({"x": 1}))  # foreign json skipped
+
+    idx = RunIndex(str(runs))
+    assert idx.load() == 2
+    assert [m["run_id"] for m in idx.runs] == ["run_b", "run_a"]  # newest first
+    assert idx.transcribers(idx.runs[0]) == ["cjm-capability-voxtral-hf"]
+
+    counts = idx.counts_by_path()
+    assert counts[str(src.resolve())] == 1
+    assert RunIndex.dir_count(counts, str(media.resolve())) == 1
+    assert RunIndex.dir_count(counts, str(tmp_path.resolve())) == 2
+
+    # content identity: BOTH runs match the file, including the moved-path one
+    res = idx.hash_check(str(src))
+    assert res["content_hash"] == digest
+    assert [h["run_id"] for h in res["matches"]] == ["run_b", "run_a"]

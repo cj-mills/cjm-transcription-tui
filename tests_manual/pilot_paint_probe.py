@@ -73,6 +73,7 @@ def main() -> None:
         shutil.copytree(manifests_dir, mcopy)
         asyncio.run(drive(media, str(mcopy)))
         asyncio.run(drive_config(media, str(mcopy)))
+        asyncio.run(drive_results(media, str(mcopy), Path(td) / "runs"))
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         for i in range(60):
@@ -189,6 +190,61 @@ async def drive_config(start_dir: Path, manifests_dir: str) -> None:
     assert app.return_value is None
     print("pilot OK: config sub-view — schema rows, cycle, Input parse/validate,"
           " escape-cancel, overrides commit + spec round-trip, re-seed")
+
+
+async def drive_results(start_dir: Path, manifests_dir: str, runs_dir: Path) -> None:
+    """Results layer (6768bafb): prior-run chip, hash-check notice, bookmark
+    star + cycle, and the runs list -> drilled-run -> segment-text walk."""
+    import json
+    from cjm_substrate.utils.hashing import hash_file
+
+    src = start_dir / "ep1.mp3"
+    digest = hash_file(str(src))
+    runs_dir.mkdir(exist_ok=True)
+    (runs_dir / "run_x.json").write_text(json.dumps({
+        "run_id": "run_x", "created_at": 100.0,
+        "config": {"transcriber_capabilities": ["cjm-capability-whisper"]},
+        "sources": [{"source_path": str(src), "content_hash": digest,
+                     "segments": [{"index": 0, "start": 0.0, "end": 2.0,
+                                   "transcripts": {"cjm-capability-whisper":
+                                                   {"text": "pilot transcript"}}}]}]}))
+    app = TranscriptionApp(manifests_dir, start_dir=str(start_dir),
+                           runs_dir=str(runs_dir))
+    async with app.run_test() as pilot:
+        def paint() -> str:
+            app._paint_now()
+            return str(app.query_one("#main", Static).render())
+
+        def status() -> str:
+            app._paint_now()
+            return str(app.query_one("#status", Static).render())
+
+        # prior-run chip: path-keyed count painted on the browser row at mount
+        assert "·1 run" in paint(), paint()
+        # hash-check the focused file (cursor starts on ep1.mp3)
+        await pilot.press("h")
+        await pilot.pause()
+        assert "content in 1 prior run(s)" in status(), status()
+        # bookmark the cwd (★ in header) and cycle back to it with '
+        await pilot.press("m")
+        assert "★" in paint(), paint()
+        await pilot.press("apostrophe")
+        assert app.browser.cwd == start_dir.resolve()
+        # results view: list -> drill -> per-transcriber segment text -> unwind
+        await pilot.press("v")
+        assert app.stage == "results", app.stage
+        body = paint()
+        assert "run_x" in body and "1 source(s)" in body, body[:300]
+        await pilot.press("enter")
+        body = paint()
+        assert "pilot transcript" in body and "segment 1/1" in body, body[:400]
+        await pilot.press("b")             # drilled -> runs list
+        assert app.results_run is None
+        await pilot.press("b")             # runs list -> sources
+        assert app.stage == "sources", app.stage
+        await pilot.press("q")
+    assert app.return_value is None
+    print("pilot OK: results drill, prior-run chip, hash-check notice, bookmark star")
 
 
 # Entry-point dispatch — LAST region on purpose (main names every driver above,
