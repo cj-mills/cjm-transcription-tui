@@ -78,6 +78,7 @@ class TranscriptionApp(App):
         Binding("right_square_bracket", "segment(1)", "next segment", key_display="]"),
         Binding("r", "rerun", "re-probe segment"),
         Binding("p", "play", "play/stop segment"),
+        Binding("d", "preprocess", "preprocessing A/B"),
         Binding("escape", "cancel_probe", "cancel probe", show=False, priority=True),
         Binding("q", "quit_app", "quit"),
     ]
@@ -89,6 +90,7 @@ class TranscriptionApp(App):
                  graph_capability: Optional[str] = None,       # Journal target (None = NOT JOURNALED)
                  graph_db_path: Optional[str] = None,          # Caller-wins graph db override
                  initial_picks: Optional[List[str]] = None,    # Persisted candidate instance ids
+                 preprocessing_capability: Optional[str] = None,  # source_separation capability for the d A/B (None = axis hidden)
                  max_segment_duration: float = 220.0):   # Segment wall-clock cap (probe + plan)
         super().__init__()
         self.manifests_dir = manifests_dir
@@ -133,6 +135,10 @@ class TranscriptionApp(App):
         # Manual segment playback (kit ChunkPlayer; created lazily on first p —
         # keeps envs without a PortAudio device usable, error surfaced in-status).
         self.player: Optional[ChunkPlayer] = None
+        # Preprocessing A/B (5aba2ab6): capability loads lazily on the FIRST d
+        # toggle of a stack — an unused axis never pays the model load.
+        self.preprocessing_capability = preprocessing_capability
+        self.preprocess_loaded = False
         # Repaint coalescing (kit RepaintThrottle) + background-unload state
         self._throttle = RepaintThrottle(self._paint_now, self.set_timer,
                                          self.REPAINT_INTERVAL)
@@ -188,7 +194,7 @@ class TranscriptionApp(App):
                 "config": ("enter edit/cycle · b back to candidates · q quit"
                            if not self.form_editing
                            else "type a value · enter apply · escape cancel"),
-                "compare": "[ ] segment · p play · l lightweight · a accuracy · r re-probe · enter confirm+run · b back · q quit",
+                "compare": "[ ] segment · p play · d preprocess · l lightweight · a accuracy · r re-probe · enter confirm+run · b back · q quit",
             }[self.stage]
             status.append(f" {self.stage.upper()}  ·  {hints}", style="dim")
         # The one-line dock cannot wrap — long busy/error strings truncated
@@ -345,6 +351,12 @@ class TranscriptionApp(App):
         header = Text()
         header.append(f" {Path(src).name}", style="bold")
         header.append(f"   segment {self.seg_index + 1}/{self.seg_count}", style="dim")
+        if self.probe is not None and self.probe.preprocessing_id:
+            pre = self.probe.preprocessing_id.removeprefix("cjm-capability-")
+            if self.probe.preprocess:
+                header.append(f"   {pre} ON", style="bold green")
+            else:
+                header.append(f"   {pre} off", style="dim")
         header.truncate(width, overflow="ellipsis")
         out.append_text(header)
         out.append("\n\n")
@@ -592,8 +604,41 @@ class TranscriptionApp(App):
 
     def action_rerun(self) -> None:
         if self.stage == "compare" and self.probe is not None and not self.busy:
-            self.probe._rows.pop(self.seg_index, None)
+            self.probe._rows.pop((self.seg_index, self.probe.preprocess), None)
             self.run_worker(self._run_compare(), exclusive=True)
+
+    async def action_preprocess(self) -> None:
+        """Toggle the preprocessing A/B (work item 5aba2ab6): same segment, same
+        candidates, WITH vs WITHOUT vocals isolation. Rows and playback WAVs
+        cache per (segment, toggle) so flipping back is free — and p plays the
+        isolated rendition while ON, so the operator HEARS what isolation
+        removed before judging whether the full run needs it."""
+        if self.stage != "compare" or self.probe is None or self.busy:
+            return
+        pid = self.probe.preprocessing_id
+        if not pid:
+            self.error = "no source_separation capability installed"
+            self._paint()
+            return
+        if not self.preprocess_loaded:
+            self.busy = f"loading {pid} (first toggle of this stack)..."
+            self._paint()
+            try:
+                # load_capabilities raises SystemExit on a missing manifest —
+                # BaseException so a typo'd capability lands in-status, not a crash.
+                await asyncio.to_thread(load_capabilities, self.manager, [pid])
+            except BaseException as e:
+                self.busy = None
+                self.error = f"preprocessing load failed: {e}"
+                self._paint()
+                return
+            self.preprocess_loaded = True
+            self.loaded_ids.append(pid)  # reverse-order teardown unloads it first
+            self.busy = None
+        self.probe.preprocess = not self.probe.preprocess
+        if self.player is not None:
+            self.player.stop()  # the audible referent just changed renditions
+        self.run_worker(self._run_compare(), exclusive=True)
 
     def action_play(self) -> None:
         """Play/stop the focused segment's model-input WAV (manual trigger, NOT
@@ -694,7 +739,8 @@ class TranscriptionApp(App):
             self.queue = JobQueue(deps=manager,
                                   sysmon_capability_name=self.sysmon_capability)
             await self.queue.start()
-            self.probe = SegmentProbe(manager, self.queue, cfg, source, ids)
+            self.probe = SegmentProbe(manager, self.queue, cfg, source, ids,
+                                      preprocessing_id=self.preprocessing_capability)
             self.busy = "cutting segments (convert -> VAD -> boundaries -> cut)..."
             self._paint()
             self.seg_count = await self.probe.prepare()
@@ -720,7 +766,8 @@ class TranscriptionApp(App):
         # completed while the pane still showed the 00:11:59 error).
         self.error = None
         base = (f"transcribing segment {self.seg_index + 1}/{self.seg_count} "
-                f"across {len(self.probe.transcriber_ids)} candidate(s)...")
+                f"across {len(self.probe.transcriber_ids)} candidate(s)"
+                + (" with preprocessing" if self.probe.preprocess else "") + "...")
         self.busy = base
         self._paint()
         watcher = asyncio.create_task(self._watch_blocked(base))
@@ -768,6 +815,7 @@ class TranscriptionApp(App):
         self.manager = None
         self.probe = None
         self.loaded_ids = []
+        self.preprocess_loaded = False  # the next stack must re-load the axis
         return queue, manager, ids
 
     async def _teardown_of(self, queue, manager, ids) -> None:
@@ -846,6 +894,12 @@ class TranscriptionApp(App):
             "graph_capability": self.graph_capability,
             "graph_db_path": self.graph_db_path,
             "manifests_dir": self.manifests_dir,
+            # The A/B verdict rides the plan ONLY when the operator toggled it
+            # ON — off is indistinguishable from untouched, so the CLI flag
+            # stays the fallback (plan_argv: plan value wins over the flag).
+            "preprocessing_capability": (self.probe.preprocessing_id
+                                         if (self.probe is not None
+                                             and self.probe.preprocess) else None),
             # Persistence payload (state.py): choices the operator never retypes.
             "picked_instance_ids": [d["instance_id"] for d in self._picked_directives()],
             "last_cwd": str(self.browser.cwd),

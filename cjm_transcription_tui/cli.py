@@ -77,8 +77,12 @@ def plan_argv(
         argv += ["--graph-capability", plan["graph_capability"]]
         if plan.get("graph_db_path"):
             argv += ["--graph-db-path", plan["graph_db_path"]]
-    if args.preprocessing_capability:
-        argv += ["--preprocessing-capability", args.preprocessing_capability]
+    pre = plan.get("preprocessing_capability") or args.preprocessing_capability
+    if pre:
+        # The in-TUI A/B verdict (toggled ON at confirm) wins over the static
+        # flag; toggled-off is indistinguishable from untouched, so the flag
+        # stays the fallback for scripted runs.
+        argv += ["--preprocessing-capability", pre]
     if args.actor:
         argv += ["--actor", args.actor]
     return argv
@@ -105,6 +109,10 @@ def main() -> int:  # Console-script entry point (cjm-transcription-tui)
                            graph_capability=graph_capability,
                            graph_db_path=graph_db_path,
                            initial_picks=state.get("picked_instance_ids"),
+                           preprocessing_capability=(
+                               args.preprocessing_capability
+                               or discover_capability(args.manifests_dir,
+                                                      "separate_vocals")),
                            max_segment_duration=args.max_segment_duration)
     plan = app.run()
     if not plan:

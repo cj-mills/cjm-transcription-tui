@@ -120,6 +120,21 @@ def test_plan_argv_parses_in_the_core_cli(tmp_path):
     assert parsed.graph_db_path == "/tmp/g.db"
     assert parsed.actor == "tui:test"
     assert parsed.sysmon_capability is None
+    # no toggle judgment, no flag -> preprocessing stays off in the hand-off
+    assert parsed.preprocessing_capability is None
+
+    # the in-TUI A/B verdict rides the plan and WINS over the passthrough flag;
+    # toggled-off (plan None) falls back to the flag for scripted runs
+    plan["preprocessing_capability"] = "cjm-capability-demucs"
+    parsed = core_build_parser().parse_args(plan_argv(plan, args))
+    assert parsed.preprocessing_capability == "cjm-capability-demucs"
+    flag_args = build_parser().parse_args(
+        ["--preprocessing-capability", "cjm-capability-other"])
+    parsed = core_build_parser().parse_args(plan_argv(plan, flag_args))
+    assert parsed.preprocessing_capability == "cjm-capability-demucs"
+    plan["preprocessing_capability"] = None
+    parsed = core_build_parser().parse_args(plan_argv(plan, flag_args))
+    assert parsed.preprocessing_capability == "cjm-capability-other"
 
 
 def test_state_roundtrip_and_role_discovery(tmp_path):
@@ -132,8 +147,12 @@ def test_state_roundtrip_and_role_discovery(tmp_path):
     _write_manifest(manifests, "cjm-capability-monitor-nvidia",
                     ["get_system_status", "list_processes"], {})
     _write_manifest(manifests, "cjm-capability-whisper", ["transcribe"], {})
+    _write_manifest(manifests, "cjm-capability-demucs",
+                    ["separate_vocals", "separate_stems"], {})
     assert discover_capability(str(manifests), "add_nodes") == "cjm-capability-graph-sqlite"
     assert discover_capability(str(manifests), "get_system_status") == "cjm-capability-monitor-nvidia"
+    # preprocessing A/B (5aba2ab6): the d-toggle capability is role-discovered too
+    assert discover_capability(str(manifests), "separate_vocals") == "cjm-capability-demucs"
     assert discover_capability(str(manifests), "no_such_method") is None
 
     # state sidecar lands NEXT TO the manifests dir and round-trips merges
