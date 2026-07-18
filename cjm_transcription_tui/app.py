@@ -220,7 +220,7 @@ class TranscriptionApp(App):
                 "compare": "[ ] segment · p play · d preprocess · l lightweight · a accuracy · r re-probe · enter confirm+run · b back · q quit",
                 "results": ("enter open run · j/k walk · b back · q quit"
                             if self.results_run is None
-                            else "j/k source · [ ] segment · b runs list · q quit"),
+                            else "j/k source · [ ] segment · p play · b runs list · q quit"),
             }[self.stage]
             status.append(f" {self.stage.upper()}  ·  {hints}", style="dim")
         # The one-line dock cannot wrap — long busy/error strings truncated
@@ -564,6 +564,8 @@ class TranscriptionApp(App):
                     self.results_src = max(0, min(self.results_src + delta,
                                                   len(srcs) - 1))
                     self.results_seg = 0
+                    if self.player is not None:
+                        self.player.stop()  # focused audio referent changed
         elif self.rows:
             self.row_cursor = max(0, min(self.row_cursor + delta, len(self.rows) - 1))
         self._paint()
@@ -737,6 +739,8 @@ class TranscriptionApp(App):
             self._teardown_in_background()
             self.stage = "candidates"
         elif self.stage == "results":
+            if self.player is not None:
+                self.player.stop()
             if self.results_run is not None:
                 self.results_run = None  # drilled run -> back to the runs list
             else:
@@ -752,6 +756,8 @@ class TranscriptionApp(App):
             if segs:
                 self.results_seg = max(0, min(self.results_seg + delta,
                                               len(segs) - 1))
+                if self.player is not None:
+                    self.player.stop()  # walking segments silences the old one
                 self._paint()
             return
         if self.stage == "compare" and self.seg_count and not self.busy:
@@ -888,18 +894,39 @@ class TranscriptionApp(App):
     def action_play(self) -> None:
         """Play/stop the focused segment's model-input WAV (manual trigger, NOT
         autoplay — aafce2c6 component (b)). The operator hears exactly what the
-        candidates heard, background music included, so the demucs judgment and
-        the transcript comparison share one referent. p toggles: press again to
-        cut playback mid-segment."""
-        if self.stage != "compare" or self.probe is None:
-            return
+        models heard, background music included, so the demucs judgment and the
+        transcript comparison share one referent. Works in BOTH audio-bearing
+        views (drive-4 follow-up): the compare stage plays the probe's WAV, a
+        drilled past run plays the manifest segment's recorded model_input_path
+        — problem areas surface by ear BEFORE the correction TUI, informing
+        whether a run should be redone. p toggles: press again to cut playback."""
         if self.player is not None and self.player.playing:
             self.player.stop()
             return
-        wav = self.probe.wav_path(self.seg_index)
-        if wav is None:
-            self.error = "no probed audio for this segment yet"
-            self._paint()
+        wav: Optional[str] = None
+        dur = 0.0
+        if self.stage == "compare" and self.probe is not None:
+            wav = self.probe.wav_path(self.seg_index)
+            if wav is None:
+                self.error = "no probed audio for this segment yet"
+                self._paint()
+                return
+            dur = float(self.probe.raw_segments[self.seg_index].duration)
+        elif self.stage == "results" and self.results_run is not None:
+            seg = self._results_segment()
+            if seg is None:
+                return
+            wav = seg.get("model_input_path") or ""
+            if not wav or not Path(wav).exists():
+                self.error = "segment audio not on disk (capability cache cleaned?)"
+                self._paint()
+                return
+            dur = float(seg.get("duration") or 0.0)
+            if dur <= 0:
+                dur = (max(0.0, float(seg.get("end") or 0.0)
+                           - float(seg.get("start") or 0.0))
+                       or 1e9)  # load_chunk clamps to the file's real length
+        else:
             return
         try:
             if self.player is None:
@@ -907,11 +934,22 @@ class TranscriptionApp(App):
                     # PortAudio/ALSA probe chatter prints to fd 2 and stamps
                     # over the paint in app mode (drive finding 2026-07-17).
                     self.player = ChunkPlayer()
-            seg = self.probe.raw_segments[self.seg_index]
-            self.player.play(load_chunk(wav, 0.0, float(seg.duration)))
+            self.player.play(load_chunk(wav, 0.0, dur))
         except Exception as e:
             self.error = f"playback unavailable: {e}"
             self._paint()
+
+    def _results_segment(self) -> Optional[Dict[str, Any]]:
+        """The drilled run's focused segment dict (None when nothing is focused)."""
+        if self.results_run is None:
+            return None
+        srcs = self.run_index.runs[self.results_run]["sources"]
+        if not srcs or not (0 <= self.results_src < len(srcs)):
+            return None
+        segs = srcs[self.results_src].get("segments") or []
+        if not segs:
+            return None
+        return segs[max(0, min(self.results_seg, len(segs) - 1))]
 
     async def action_cancel_probe(self) -> None:
         # Escape also backs out of the config value-entry Input (no apply).

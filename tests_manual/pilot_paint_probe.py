@@ -198,16 +198,26 @@ async def drive_results(start_dir: Path, manifests_dir: str, runs_dir: Path) -> 
     import json
     from cjm_substrate.utils.hashing import hash_file
 
+    import numpy as np
+    import soundfile as sf
+
     src = start_dir / "ep1.mp3"
     digest = hash_file(str(src))
     runs_dir.mkdir(exist_ok=True)
+    wav = runs_dir / "seg0000.wav"  # a REAL model-input WAV for the p gesture
+    sf.write(str(wav), np.zeros(3200, dtype="float32"), 16000)
     (runs_dir / "run_x.json").write_text(json.dumps({
         "run_id": "run_x", "created_at": 100.0,
         "config": {"transcriber_capabilities": ["cjm-capability-whisper"]},
         "sources": [{"source_path": str(src), "content_hash": digest,
                      "segments": [{"index": 0, "start": 0.0, "end": 2.0,
+                                   "model_input_path": str(wav),
                                    "transcripts": {"cjm-capability-whisper":
-                                                   {"text": "pilot transcript"}}}]}]}))
+                                                   {"text": "pilot transcript"}}},
+                                  {"index": 1, "start": 2.0, "end": 3.0,
+                                   "model_input_path": str(runs_dir / "gone.wav"),
+                                   "transcripts": {"cjm-capability-whisper":
+                                                   {"text": "second segment"}}}]}]}))
     app = TranscriptionApp(manifests_dir, start_dir=str(start_dir),
                            runs_dir=str(runs_dir))
     async with app.run_test() as pilot:
@@ -237,14 +247,25 @@ async def drive_results(start_dir: Path, manifests_dir: str, runs_dir: Path) -> 
         assert "run_x" in body and "1 source(s)" in body, body[:300]
         await pilot.press("enter")
         body = paint()
-        assert "pilot transcript" in body and "segment 1/1" in body, body[:400]
+        assert "pilot transcript" in body and "segment 1/2" in body, body[:400]
+        # p plays the manifest segment's recorded model-input WAV (drive-4
+        # follow-up: hear problem areas before the correction TUI)
+        await pilot.press("p")
+        assert app.player is not None, "player never created"
+        assert app.error is None, app.error
+        await pilot.press("p")             # toggle: stop
+        assert not app.player.playing
+        await pilot.press("right_square_bracket")   # -> segment 2 (missing WAV)
+        await pilot.press("p")
+        assert app.error and "not on disk" in app.error, app.error
+        app.error = None
         await pilot.press("b")             # drilled -> runs list
         assert app.results_run is None
         await pilot.press("b")             # runs list -> sources
         assert app.stage == "sources", app.stage
         await pilot.press("q")
     assert app.return_value is None
-    print("pilot OK: results drill, prior-run chip, hash-check notice, bookmark star")
+    print("pilot OK: results drill + playback, prior-run chip, hash-check, bookmark star")
 
 
 # Entry-point dispatch — LAST region on purpose (main names every driver above,
