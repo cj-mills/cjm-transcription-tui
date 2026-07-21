@@ -5,9 +5,11 @@ is reproducible by copy-paste, and --plan-only stops at the printout.
 """
 
 import argparse
+import os
 import shlex
 from typing import Any, Dict, List
 
+from cjm_substrate.core.workspace import resolve_workspace
 from cjm_transcription_core.cli import main as core_main
 
 from .app import TranscriptionApp
@@ -25,8 +27,13 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                     "the confirmed run is handed to cjm-transcription-core.")
     p.add_argument("paths", nargs="*",
                    help="Pre-selected source files/folders (add more in-app)")
-    p.add_argument("--manifests-dir", default=".cjm/manifests",
-                   help="Capability manifests directory")
+    p.add_argument("--manifests-dir", default=None,
+                   help="Capability manifests directory (default: the workspace's "
+                        ".cjm/manifests when one is active, else .cjm/manifests under the cwd)")
+    p.add_argument("--workspace", default=None,
+                   help="Workspace root (5daadfc4; default: CJM_WORKSPACE env, else upward walk "
+                        "from cwd). Supplies manifests/runs/browse defaults and is exported so "
+                        "the core hand-off + capability workers resolve workspace-scoped paths")
     p.add_argument("--start-dir", default=".",
                    help="Browser root for the sources stage")
     p.add_argument("--sysmon-capability", default=None,
@@ -83,6 +90,10 @@ def plan_argv(
         # flag; toggled-off is indistinguishable from untouched, so the flag
         # stays the fallback for scripted runs.
         argv += ["--preprocessing-capability", pre]
+    if args.workspace:
+        # Explicit flag passes through so the printed command replays standalone;
+        # env/walk-resolved workspaces replay via the same env/cwd.
+        argv += ["--workspace", args.workspace]
     if args.actor:
         argv += ["--actor", args.actor]
     return argv
@@ -92,6 +103,14 @@ def main() -> int:  # Console-script entry point (cjm-transcription-tui)
     """Resolve settings (flags > persisted state > manifest discovery), run the
     setup app, persist the confirmed choices, then print + exec the headless run."""
     args = build_parser().parse_args()
+    # 5daadfc4 workspace: resolve before anything reads paths; export so the
+    # in-process core hand-off + capability workers are workspace-scoped.
+    ws = resolve_workspace(explicit=args.workspace)
+    if ws is not None:
+        os.environ["CJM_WORKSPACE"] = str(ws.root)
+    if args.manifests_dir is None:
+        args.manifests_dir = (str(ws.substrate_data_dir / "manifests")
+                              if ws is not None else ".cjm/manifests")
     state = load_state(args.manifests_dir)
     # Journaling-by-default (drive-1 finding): an unjournaled run takes an
     # EXPLICIT --no-graph, never a forgotten flag; sysmon likewise.
@@ -102,8 +121,10 @@ def main() -> int:  # Console-script entry point (cjm-transcription-tui)
     sysmon = None if args.no_sysmon else (
         args.sysmon_capability or state.get("sysmon_capability")
         or discover_capability(args.manifests_dir, "get_system_status"))
-    start_dir = args.start_dir if args.start_dir != "." else (state.get("last_cwd") or ".")
+    start_dir = args.start_dir if args.start_dir != "." else (
+        state.get("last_cwd") or (str(ws.root) if ws is not None else "."))
     app = TranscriptionApp(args.manifests_dir, start_dir=start_dir,
+                           runs_dir=(str(ws.runs_dir) if ws is not None else "runs"),
                            initial_sources=args.paths or None,
                            sysmon_capability=sysmon,
                            graph_capability=graph_capability,

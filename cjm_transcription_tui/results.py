@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+from cjm_substrate.core.workspace import resolve_recorded_tree
 from cjm_substrate.utils.hashing import hash_file
 
 
@@ -42,7 +43,9 @@ class RunIndex:
             files = []
         for f in files:
             try:
-                m = json.loads(f.read_text())
+                # ${WS}/ recorded paths (5daadfc4 rung f) resolve at load,
+                # anchored at the manifest's own location.
+                m = resolve_recorded_tree(json.loads(f.read_text()), f)
             except (OSError, ValueError):
                 continue
             if not (isinstance(m, dict) and m.get("run_id")
