@@ -90,6 +90,14 @@ def plan_argv(
         # flag; toggled-off is indistinguishable from untouched, so the flag
         # stays the fallback for scripted runs.
         argv += ["--preprocessing-capability", pre]
+    coll = plan.get("collection") or {}
+    if coll.get("mode") == "named" and coll.get("title"):
+        # The operator touched the field = a confirmation act (ae3464fc).
+        argv += ["--collection", coll["title"]]
+    elif coll.get("mode") == "off":
+        argv += ["--no-collection"]
+    # mode "auto" passes nothing: the core proposes per folder-source, exactly
+    # as the same argv would hands-off.
     if args.workspace:
         # Explicit flag passes through so the printed command replays standalone;
         # env/walk-resolved workspaces replay via the same env/cwd.

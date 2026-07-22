@@ -40,6 +40,25 @@ async def drive(start_dir: Path, manifests_dir: str) -> None:
         await pilot.press("a")                # cwd as an (unexpanded) folder source
         assert len(app.browser.selected) == 2
 
+        # Collection field (ae3464fc): the folder-source proposes; c names
+        # (confirmation act), empty submit falls back to auto, x declines.
+        body = paint()
+        assert "Collection:" in body and "proposed from folder" in body, body[-300:]
+        await pilot.press("c")                # sources-stage c = collection editor
+        editor = app.query_one("#editor", Input)
+        assert app.collection_editing and editor.display
+        assert editor.value == "media", editor.value   # single-folder prefill
+        editor.value = "Supernova in the East"
+        await pilot.press("enter")
+        assert not app.collection_editing
+        assert (app.collection.mode, app.collection.title) == \
+            ("named", "Supernova in the East")
+        assert "confirmed at launch" in paint()
+        await pilot.press("x")                # decline <-> auto toggle
+        assert "--no-collection" in paint()
+        await pilot.press("x")
+        assert app.collection.mode == "auto"
+
         await pilot.press("n")                # -> candidates
         assert app.stage == "candidates", app.stage
         body = paint()

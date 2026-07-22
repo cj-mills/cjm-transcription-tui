@@ -16,7 +16,7 @@ classifiers = [
 ]
 dependencies = [
     'cjm-substrate-tui-kit>=0.0.1',
-    'cjm-transcription-core>=0.0.4',
+    'cjm-transcription-core>=0.0.5',
     'textual',
 ]
 

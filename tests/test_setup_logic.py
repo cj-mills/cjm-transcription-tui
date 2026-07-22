@@ -12,7 +12,8 @@ from cjm_transcription_tui.candidates import (candidate_directives, discover_cap
                                               instance_id_for, model_axis, spec_string,
                                               transcription_manifests)
 from cjm_transcription_tui.cli import build_parser, plan_argv
-from cjm_transcription_tui.sources import SourceBrowser
+from cjm_transcription_tui.results import RunIndex
+from cjm_transcription_tui.sources import CollectionField, SourceBrowser
 from cjm_substrate_tui_kit.viewport import tail, visible_slice
 from cjm_transcription_tui.state import load_state, save_state, state_path
 
@@ -273,3 +274,60 @@ def test_run_index(tmp_path):
     res = idx.hash_check(str(src))
     assert res["content_hash"] == digest
     assert [h["run_id"] for h in res["matches"]] == ["run_b", "run_a"]
+
+
+def test_collection_field_and_plan_argv_mapping(tmp_path):
+    d = tmp_path / "Hardcore_History"
+    d.mkdir()
+    (d / "ep1.mp3").write_bytes(b"x")
+    lone = tmp_path / "lone.mp3"
+    lone.write_bytes(b"x")
+
+    # auto: proposals preview exactly what an untouched run would propose
+    f = CollectionField()
+    sel = [str(lone), str(d)]
+    assert f.proposals(sel) == ["Hardcore History"]
+    assert f.prefill(sel) == "Hardcore History", "single folder seeds the editor"
+    text, mode = f.summary(sel)
+    assert mode == "auto" and "Hardcore History" in text
+
+    # named: the operator touched it; empty submit falls back to auto
+    f.set_named("  Supernova in the East ")
+    assert (f.mode, f.title) == ("named", "Supernova in the East")
+    assert f.prefill(sel) == "Supernova in the East"
+    f.set_named("")
+    assert (f.mode, f.title) == ("auto", None)
+
+    # off: declining is a toggle, never sticky state
+    f.toggle_off()
+    assert f.summary(sel) == ("none  (--no-collection)", "off")
+    f.toggle_off()
+    assert f.mode == "auto"
+
+    # plan_argv contract: each mode parses in the CORE CLI as the right flags
+    args = build_parser().parse_args([])
+    plan = {"sources": [str(lone)], "transcribers": ["cjm-capability-whisper"],
+            "lightweight": "w", "accuracy": "w", "max_segment_duration": 220.0,
+            "sysmon_capability": None, "graph_capability": None,
+            "graph_db_path": None, "manifests_dir": ".cjm/manifests"}
+    parsed = core_build_parser().parse_args(plan_argv(plan, args))
+    assert parsed.collection is None and parsed.no_collection is False, \
+        "no plan field (or auto) passes nothing — the core proposes"
+    plan["collection"] = {"mode": "named", "title": "Supernova in the East"}
+    parsed = core_build_parser().parse_args(plan_argv(plan, args))
+    assert parsed.collection == "Supernova in the East"
+    plan["collection"] = {"mode": "off", "title": None}
+    parsed = core_build_parser().parse_args(plan_argv(plan, args))
+    assert parsed.no_collection is True
+
+    # pick-existing surface: recent titles out of past manifests, newest first
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    for i, title in enumerate(["Old Book", "Hardcore History"]):
+        (runs / f"r{i}.json").write_text(json.dumps({
+            "format": "cjm-transcription-core/run-manifest", "run_id": f"r{i}",
+            "created_at": float(i), "sources": [],
+            "collections": [{"title": title}]}))
+    idx = RunIndex(str(runs))
+    idx.load()
+    assert idx.collection_titles() == ["Hardcore History", "Old Book"]

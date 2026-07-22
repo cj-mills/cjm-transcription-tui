@@ -32,7 +32,7 @@ from textual.widgets import Input, Static
 from .candidates import candidate_directives, model_axis, spec_string, transcription_manifests
 from .probe import SegmentProbe
 from .results import RunIndex
-from .sources import SourceBrowser
+from .sources import CollectionField, SourceBrowser
 from .state import save_state
 
 
@@ -82,6 +82,7 @@ class TranscriptionApp(App):
         Binding("p", "play", "play/stop segment"),
         Binding("d", "preprocess", "preprocessing A/B"),
         Binding("v", "results", "past runs", show=False),
+        Binding("x", "collection_none", "no collection", show=False),
         Binding("h", "hash_check", "hash-check source", show=False),
         Binding("m", "bookmark", "bookmark directory", show=False),
         Binding("apostrophe", "jump_bookmark", "jump bookmark", show=False),
@@ -107,6 +108,12 @@ class TranscriptionApp(App):
         self.graph_db_path = graph_db_path
         self.max_segment_duration = max_segment_duration
         self.browser = SourceBrowser(start_dir)
+        # Pre-run collection field (ae3464fc): auto = the core proposes per
+        # folder-source; the operator names (c) or declines (x) at the natural
+        # moment. Per-run state — deliberately NOT persisted.
+        self.collection = CollectionField()
+        self.collection_editing = False        # the transient Input holds focus for c
+        self._collection_suggestions: List[str] = []  # past-manifest titles (pick-existing)
         for p in initial_sources or []:
             self.browser.toggle(Path(p))
         self.candidates = candidate_directives(manifests_dir)
@@ -212,7 +219,7 @@ class TranscriptionApp(App):
             status.append(f" {self.notice} ", style="cyan")
         else:
             hints = {
-                "sources": "enter descend/toggle · a folder-source · v runs · h hash · m/' bookmark · backspace up · n next · q quit",
+                "sources": "enter descend/toggle · a folder-source · c collection · x no-collection · v runs · h hash · m/' bookmark · backspace up · n next · q quit",
                 "candidates": "enter/space toggle · c config · n compare · b back · q quit",
                 "config": ("enter edit/cycle · b back to candidates · q quit"
                            if not self.form_editing
@@ -249,7 +256,9 @@ class TranscriptionApp(App):
         height = max(4, self.size.height - 1)
         sel = self.browser.selected
         sel_shown = min(len(sel), 4)
-        entry_budget = max(3, height - 3 - sel_shown - (1 if len(sel) > sel_shown else 0))
+        # -5: the Selected header block AND the collection line both live below
+        # the listing (windowing budget counts LINES; drive-2 discipline).
+        entry_budget = max(3, height - 5 - sel_shown - (1 if len(sel) > sel_shown else 0))
         start, end, above, below = visible_slice(len(rows), self.browser.cursor,
                                                  entry_budget)
         keys = self.browser.entry_keys()
@@ -286,6 +295,22 @@ class TranscriptionApp(App):
         for s in sel[len(sel) - sel_shown:]:
             kind = "dir " if Path(s).is_dir() else "file"
             out.append(f"   {kind}  {tail(s, width - 9)}\n", style="green")
+        # Collection line (ae3464fc): what the confirmed run will file into.
+        summary, mode = self.collection.summary(sel)
+        out.append("\n Collection: ", style="bold")
+        line = Text()
+        line.append(summary, style={"named": "green", "auto": "yellow",
+                                    "off": "dim", "none": "dim"}[mode])
+        line.truncate(max(4, width - 13), overflow="ellipsis")
+        out.append_text(line)
+        out.append("\n")
+        if self.collection_editing and self._collection_suggestions:
+            hint = Text()
+            hint.append("   recent: " + " · ".join(self._collection_suggestions),
+                        style="dim cyan")
+            hint.truncate(width, overflow="ellipsis")
+            out.append_text(hint)
+            out.append("\n")
         return out
 
     def _paint_candidates(self) -> Text:
@@ -605,6 +630,13 @@ class TranscriptionApp(App):
             return
         self._paint()
 
+    def action_collection_none(self) -> None:
+        """Toggle no-collection <-> auto in the sources stage (x; ae3464fc:
+        declining is first-class, an unfiled run is never a gate)."""
+        if self.stage == "sources" and not self.busy and not self.collection_editing:
+            self.collection.toggle_off()
+            self._paint()
+
     def action_updir(self) -> None:
         if self.stage == "sources" and not self.busy:
             self.browser.up()
@@ -630,7 +662,14 @@ class TranscriptionApp(App):
         Builds a ConfigForm from the capability's manifest config_schema minus
         its model axis (the candidates picker owns that), seeded with any config
         already on the directive, and switches to the config stage. A capability
-        with no configurable fields surfaces a message and stays put."""
+        with no configurable fields surfaces a message and stays put.
+
+        In the SOURCES stage, c is the collection editor instead (ae3464fc:
+        name-or-select at the natural moment; one key, stage-dispatched like
+        the rest of the vocabulary)."""
+        if self.stage == "sources" and not self.busy:
+            self._open_collection_editor()
+            return
         if self.busy or self.stage != "candidates" or not self.candidates:
             return
         cand = self.candidates[self.cand_cursor]
@@ -648,6 +687,22 @@ class TranscriptionApp(App):
         self.form_cursor = 0
         self.error = None
         self.stage = "config"
+        self._paint()
+
+    def _open_collection_editor(self) -> None:
+        """Show the transient Input primed for the run's collection title.
+
+        Prefill = the committed title, else a single folder-source's proposal
+        (accepting the prefill IS the confirmation act — the operator touched
+        it). Recent titles from past manifests paint as pick-existing hints;
+        title identity makes retyping one of them SELECT the existing node.
+        Submitting empty falls back to auto (untouched = the core proposes)."""
+        editor = self.query_one("#editor", Input)
+        editor.value = self.collection.prefill(self.browser.selected)
+        editor.display = True
+        editor.focus()
+        self.collection_editing = True
+        self._collection_suggestions = self.run_index.collection_titles()[:5]
         self._paint()
 
     def _open_field_editor(self, field) -> None:
@@ -670,6 +725,17 @@ class TranscriptionApp(App):
 
         A parse failure keeps the Input open with a row-paintable reason (the
         ratified escape-hatch contract: failures leave the value untouched)."""
+        if self.collection_editing:
+            self.collection.set_named(event.value)
+            editor = self.query_one("#editor", Input)
+            editor.display = False
+            editor.value = ""
+            self.set_focus(None)
+            self.collection_editing = False
+            self._collection_suggestions = []
+            self.error = None
+            self._paint()
+            return
         if self.form is None or not self.form_editing:
             return
         field = self.form.fields[self.form_cursor]
@@ -1183,6 +1249,10 @@ class TranscriptionApp(App):
             "preprocessing_capability": (self.probe.preprocessing_id
                                          if (self.probe is not None
                                              and self.probe.preprocess) else None),
+            # Collection field (ae3464fc): plan_argv maps named -> --collection
+            # (confirmed), off -> --no-collection, auto -> nothing (the core
+            # proposes per folder-source). Per-run, never persisted.
+            "collection": self.collection.plan_value(),
             # Persistence payload (state.py): choices the operator never retypes.
             "picked_instance_ids": [d["instance_id"] for d in self._picked_directives()],
             "last_cwd": str(self.browser.cwd),

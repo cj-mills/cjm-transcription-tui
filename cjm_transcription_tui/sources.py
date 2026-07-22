@@ -9,7 +9,7 @@ run time, keeping the TUI and headless runs byte-identical in behavior.
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from cjm_transcription_core.cli import MEDIA_SUFFIXES
 
@@ -109,3 +109,67 @@ class SourceBrowser:
         target = self.focused()
         folder = target if (target is not None and target.is_dir()) else self.cwd
         self.toggle(folder)
+
+
+class CollectionField:
+    """Pre-run collection state for the sources stage (ae3464fc: the actor
+    criterion at the natural moment).
+
+    Three modes map straight onto the core CLI's flags — the reproducibility
+    contract stays byte-identical: "auto" passes NOTHING (the core proposes a
+    collection per folder-source, status=proposed); "named" passes
+    --collection TITLE (the operator touched it = a confirmation act); "off"
+    passes --no-collection. Pure logic, Textual-free (sources.py precedent);
+    the app paints summary() and opens its transient Input over prefill().
+    """
+
+    def __init__(self):
+        self.mode = "auto"                # "auto" | "named" | "off"
+        self.title: Optional[str] = None  # The operator-named title (mode="named")
+
+    @staticmethod
+    def prettify(name: str) -> str:
+        """Folder name -> display title (underscores to spaces, collapsed) —
+        mirrors the core's proposal so the painted preview matches what a
+        hands-off run would actually propose."""
+        return " ".join(name.replace("_", " ").split())
+
+    def proposals(self, selected: List[str]) -> List[str]:
+        """The titles an untouched run would propose: one per folder-source."""
+        return [self.prettify(Path(s).name) for s in selected if Path(s).is_dir()]
+
+    def set_named(self, title: str) -> None:
+        """Commit an operator-typed title; empty falls back to auto."""
+        title = title.strip()
+        if title:
+            self.mode, self.title = "named", title
+        else:
+            self.mode, self.title = "auto", None
+
+    def toggle_off(self) -> None:
+        """Toggle none <-> auto (an unfiled run is first-class, never a gate;
+        a committed title clears — off means OFF)."""
+        self.mode = "auto" if self.mode == "off" else "off"
+        self.title = None
+
+    def prefill(self, selected: List[str]) -> str:
+        """Editor seed: the committed title, else a single folder's proposal."""
+        if self.mode == "named" and self.title:
+            return self.title
+        props = self.proposals(selected)
+        return props[0] if len(props) == 1 else ""
+
+    def summary(self, selected: List[str]) -> Tuple[str, str]:
+        """One paintable line + its mode token ("named"/"auto"/"off"/"none")."""
+        if self.mode == "named":
+            return f"{self.title}  (confirmed at launch)", "named"
+        if self.mode == "off":
+            return "none  (--no-collection)", "off"
+        props = self.proposals(selected)
+        if props:
+            return f"auto: {' · '.join(props)}  (proposed from folder)", "auto"
+        return "auto: none (no folder sources; c names one)", "none"
+
+    def plan_value(self) -> Dict[str, Optional[str]]:
+        """The confirm-plan payload plan_argv maps onto the core flags."""
+        return {"mode": self.mode, "title": self.title}

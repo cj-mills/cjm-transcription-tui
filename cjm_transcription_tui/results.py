@@ -68,6 +68,19 @@ class RunIndex:
         ids = cfg.get("transcriber_capabilities") or []
         return [str(i) for i in ids] if isinstance(ids, list) else []
 
+    def collection_titles(self) -> List[str]:
+        """Distinct collection titles from past manifests, newest-first (0.4.0
+        `collections`) — the sources stage's cheap pick-existing surface:
+        title identity means retyping one of these IS selecting the existing
+        collection node (ae3464fc), no graph stack needed at setup time."""
+        seen: List[str] = []
+        for m in self.runs:
+            for c in (m.get("collections") or []):
+                t = str(c.get("title") or "").strip()
+                if t and t not in seen:
+                    seen.append(t)
+        return seen
+
     def counts_by_path(self) -> Dict[str, int]:
         """resolved source_path -> number of runs that included it (path-keyed,
         NO hashing — the browse-time chip must stay free; hash truth is h)."""
