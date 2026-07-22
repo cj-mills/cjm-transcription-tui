@@ -519,7 +519,23 @@ class TranscriptionApp(App):
             header.append("   " + ", ".join(names), style="dim")
         header.truncate(width, overflow="ellipsis")
         out.append_text(header)
-        out.append("\n\n")
+        out.append("\n")
+        # Collection declarations + the convergence audit (d544e250): a graph
+        # record with nodes_added=0 means this run ATTACHED to a pre-existing
+        # collection — visible here so an accidental title merge never hides.
+        recs = {r.get("title"): r for r in ((m.get("graph") or {}).get("collections") or [])}
+        for decl in (m.get("collections") or []):
+            cline = Text()
+            title = str(decl.get("title") or "")
+            cline.append(f"   collection: {title}", style="bold")
+            cline.append(f"  ({decl.get('status')})", style="dim")
+            rec = recs.get(title)
+            if rec is not None and not rec.get("nodes_added"):
+                cline.append("  → attached to existing", style="yellow")
+            cline.truncate(width, overflow="ellipsis")
+            out.append_text(cline)
+            out.append("\n")
+        out.append("\n")
         row_budget = max(3, (max(4, self.size.height - 1) - 4) // 2)
         start, end, above, below = visible_slice(len(srcs), self.results_src,
                                                  row_budget)
