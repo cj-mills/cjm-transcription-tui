@@ -34,6 +34,14 @@ async def drive(start_dir: Path, manifests_dir: str) -> None:
         # journal chip: this probe passes no graph capability -> loud red state
         chip = str(app.query_one("#status", Static).render())
         assert "NOT JOURNALED" in chip, chip
+        # diarization chip (450e7c78): no capability resolved in this probe ->
+        # dim placeholder, and s explains itself instead of silently toggling
+        assert "no diarization" in chip, chip
+        await pilot.press("s")
+        app._paint_now()
+        chip = str(app.query_one("#status", Static).render())
+        assert "no diarization capability installed" in chip, chip
+        app.notice = None
         await pilot.press("enter")            # cursor starts on ep1.mp3 -> select
         assert len(app.browser.selected) == 1, app.browser.selected
         assert "[x]" in paint() and "Selected (1" in paint()
@@ -74,7 +82,29 @@ async def drive(start_dir: Path, manifests_dir: str) -> None:
         assert app.stage == "candidates"
         await pilot.press("q")                # quit (no stack open yet: no-op teardown)
     assert app.return_value is None           # quit without a confirmed plan
-    print("pilot OK: sources + candidates paint, stage nav, selection state")
+
+    # 450e7c78: with a capability resolved the chip is always-visible green and
+    # s flips it per run (wide pane: the chip row + hints exceed 80 cols).
+    app = TranscriptionApp(manifests_dir, start_dir=str(start_dir),
+                           diarization_capability="cjm-capability-pyannote")
+    async with app.run_test(size=(160, 24)) as pilot:
+        def chip_line() -> str:
+            app._paint_now()
+            return str(app.query_one("#status", Static).render())
+
+        assert app.diarization_enabled
+        assert "speakers→cjm-capability-pyannote" in chip_line(), chip_line()
+        assert "s speakers" in chip_line(), chip_line()   # offered at setup
+        await pilot.press("s")
+        assert not app.diarization_enabled
+        assert "speakers OFF" in chip_line(), chip_line()
+        await pilot.press("s")
+        assert app.diarization_enabled
+        assert "speakers→" in chip_line(), chip_line()
+        await pilot.press("q")
+    assert app.return_value is None
+    print("pilot OK: sources + candidates paint, stage nav, selection state,"
+          " diarization chip + s toggle")
 
 
 def main() -> None:

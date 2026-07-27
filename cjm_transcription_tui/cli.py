@@ -55,6 +55,13 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                         "configured db_path)")
     p.add_argument("--preprocessing-capability", default=None,
                    help="Forwarded to the confirmed run (e.g. cjm-capability-demucs)")
+    p.add_argument("--diarization-capability", default=None,
+                   help="Speaker-diarization capability for the confirmed run (default: "
+                        "last-used, else auto-discovered from manifests — the rung is ON "
+                        "by default; the in-app s toggle flips it per run)")
+    p.add_argument("--no-diarization", action="store_true",
+                   help="Start with the diarization rung OFF (overrides state + discovery; "
+                        "the s toggle can re-enable a discovered capability in-app)")
     p.add_argument("--actor", default=None,
                    help="Forwarded journal attribution (default: cli:<user>)")
     p.add_argument("--plan-only", action="store_true",
@@ -90,6 +97,15 @@ def plan_argv(
         # flag; toggled-off is indistinguishable from untouched, so the flag
         # stays the fallback for scripted runs.
         argv += ["--preprocessing-capability", pre]
+    if "diarization_capability" in plan:
+        # 450e7c78 parity: the operator SAW the diarization state at confirm, so
+        # the argv carries the choice EXPLICITLY both ways — the printed command
+        # replays identically even if the core's default ever drifts. Plans
+        # without the key (scripted callers) keep the core's own default.
+        if plan["diarization_capability"]:
+            argv += ["--diarization-capability", plan["diarization_capability"]]
+        else:
+            argv += ["--no-diarization"]
     coll = plan.get("collection") or {}
     if coll.get("mode") == "named" and coll.get("title"):
         # The operator touched the field = a confirmation act (ae3464fc).
@@ -129,6 +145,12 @@ def main() -> int:  # Console-script entry point (cjm-transcription-tui)
     sysmon = None if args.no_sysmon else (
         args.sysmon_capability or state.get("sysmon_capability")
         or discover_capability(args.manifests_dir, "get_system_status"))
+    # Diarization rides the same resolution ladder (flags > state > surface
+    # discovery); default-ON matches the core rung — an undiarized run takes an
+    # explicit --no-diarization or the in-app s toggle, never a forgotten flag.
+    diarization = None if args.no_diarization else (
+        args.diarization_capability or state.get("diarization_capability")
+        or discover_capability(args.manifests_dir, "diarize"))
     start_dir = args.start_dir if args.start_dir != "." else (
         state.get("last_cwd") or (str(ws.root) if ws is not None else "."))
     app = TranscriptionApp(args.manifests_dir, start_dir=start_dir,
@@ -143,6 +165,7 @@ def main() -> int:  # Console-script entry point (cjm-transcription-tui)
                                args.preprocessing_capability
                                or discover_capability(args.manifests_dir,
                                                       "separate_vocals")),
+                           diarization_capability=diarization,
                            max_segment_duration=args.max_segment_duration)
     plan = app.run()
     if not plan:
@@ -152,6 +175,7 @@ def main() -> int:  # Console-script entry point (cjm-transcription-tui)
                graph_capability=plan["graph_capability"],
                graph_db_path=plan["graph_db_path"],
                sysmon_capability=plan["sysmon_capability"],
+               diarization_capability=plan["diarization_capability"],
                picked_instance_ids=plan["picked_instance_ids"],
                last_cwd=plan["last_cwd"])
     argv = plan_argv(plan, args)

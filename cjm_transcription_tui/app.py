@@ -81,6 +81,7 @@ class TranscriptionApp(App):
         Binding("r", "rerun", "re-probe segment"),
         Binding("p", "play", "play/stop segment"),
         Binding("d", "preprocess", "preprocessing A/B"),
+        Binding("s", "diarization", "speakers on/off", show=False),
         Binding("v", "results", "past runs", show=False),
         Binding("x", "collection_none", "no collection", show=False),
         Binding("h", "hash_check", "hash-check source", show=False),
@@ -98,6 +99,7 @@ class TranscriptionApp(App):
                  graph_db_path: Optional[str] = None,          # Caller-wins graph db override
                  initial_picks: Optional[List[str]] = None,    # Persisted candidate instance ids
                  preprocessing_capability: Optional[str] = None,  # source_separation capability for the d A/B (None = axis hidden)
+                 diarization_capability: Optional[str] = None,    # speaker_diarization capability for the run rung (None = unavailable)
                  initial_bookmarks: Optional[List[str]] = None,   # Persisted directory bookmarks (sidecar state)
                  runs_dir: str = "runs",                 # Run-manifest dir (the core CLI's cwd-relative default)
                  max_segment_duration: float = 220.0):   # Segment wall-clock cap (probe + plan)
@@ -154,6 +156,12 @@ class TranscriptionApp(App):
         # toggle of a stack — an unused axis never pays the model load.
         self.preprocessing_capability = preprocessing_capability
         self.preprocess_loaded = False
+        # Diarization rung (450e7c78 TUI parity): default-ON whenever a
+        # capability resolved; the s toggle flips it per run, and the confirmed
+        # choice lands EXPLICITLY in the hand-off argv (never an implicit core
+        # default). Nothing loads in the TUI — the rung runs in the core hand-off.
+        self.diarization_capability = diarization_capability
+        self.diarization_enabled = diarization_capability is not None
         # Results layer (6768bafb): the core's OWN run manifests, read not
         # written; counts rebuilt on mount / v-entry, never during browse.
         self.run_index = RunIndex(runs_dir)
@@ -209,6 +217,15 @@ class TranscriptionApp(App):
             status.append(f" journal→{self.graph_capability} ", style="green")
         else:
             status.append(" NOT JOURNALED ", style="bold red")
+        # Diarization chip mirrors the journal chip's always-visible discipline:
+        # the rung is default-on, so its state must be readable at a glance and
+        # a toggled-off run must never look like an untouched one.
+        if self.diarization_capability and self.diarization_enabled:
+            status.append(f" speakers→{self.diarization_capability} ", style="green")
+        elif self.diarization_capability:
+            status.append(" speakers OFF ", style="yellow")
+        else:
+            status.append(" no diarization ", style="dim")
         if self._unload_task is not None:
             status.append(" unloading previous stack… ", style="yellow")
         if self.error:
@@ -219,8 +236,8 @@ class TranscriptionApp(App):
             status.append(f" {self.notice} ", style="cyan")
         else:
             hints = {
-                "sources": "enter descend/toggle · a folder-source · c collection · x no-collection · v runs · h hash · m/' bookmark · backspace up · n next · q quit",
-                "candidates": "enter/space toggle · c config · n compare · b back · q quit",
+                "sources": "enter descend/toggle · a folder-source · c collection · x no-collection · s speakers · v runs · h hash · m/' bookmark · backspace up · n next · q quit",
+                "candidates": "enter/space toggle · c config · s speakers · n compare · b back · q quit",
                 "config": ("enter edit/cycle · b back to candidates · q quit"
                            if not self.form_editing
                            else "type a value · enter apply · escape cancel"),
@@ -553,6 +570,15 @@ class TranscriptionApp(App):
             line.append(f"  {len(segs)} segment(s)", style="dim")
             if s.get("chain"):
                 line.append("  " + "->".join(s["chain"]), style="dim cyan")
+            # Diarization outcome (450e7c78): the manifest's per-source record,
+            # visible where the run is inspected — ok shows the yield, anything
+            # else shows the status so a degraded rung never hides.
+            d = s.get("diarization") or {}
+            if d.get("status") == "ok":
+                line.append(f"  {d.get('speaker_count')} speaker(s) · "
+                            f"{d.get('turn_count')} turn(s)", style="dim green")
+            elif d.get("status"):
+                line.append(f"  diarization: {d['status']}", style="yellow")
             line.truncate(width, overflow="ellipsis")
             out.append_text(line)
             out.append("\n")
@@ -579,6 +605,18 @@ class TranscriptionApp(App):
         return out
 
     # ---- stage actions (single key vocabulary, stage-dispatched) ----
+
+    def action_diarization(self) -> None:
+        """Flip the diarization rung for the confirmed run (450e7c78 parity:
+        the core's --no-diarization / --diarization-capability get an in-TUI
+        control; the chip repaints immediately, the choice rides the plan)."""
+        if not self.diarization_capability:
+            self.notice = ("no diarization capability installed (diarize surface) "
+                           "— pass --diarization-capability or install one")
+            self._paint()
+            return
+        self.diarization_enabled = not self.diarization_enabled
+        self._paint()
 
     def action_move(self, delta: int) -> None:
         if self.busy:
@@ -1265,6 +1303,13 @@ class TranscriptionApp(App):
             "preprocessing_capability": (self.probe.preprocessing_id
                                          if (self.probe is not None
                                              and self.probe.preprocess) else None),
+            # Effective diarization choice (name = run with it, None = the
+            # operator toggled it off or none resolved); plan_argv renders it
+            # EXPLICITLY both ways. Persisting None is fine — next session's
+            # discovery restores default-on (552bde8d: off is per-run, never
+            # a sticky ambient state).
+            "diarization_capability": (self.diarization_capability
+                                       if self.diarization_enabled else None),
             # Collection field (ae3464fc): plan_argv maps named -> --collection
             # (confirmed), off -> --no-collection, auto -> nothing (the core
             # proposes per folder-source). Per-run, never persisted.

@@ -123,6 +123,22 @@ def test_plan_argv_parses_in_the_core_cli(tmp_path):
     assert parsed.sysmon_capability is None
     # no toggle judgment, no flag -> preprocessing stays off in the hand-off
     assert parsed.preprocessing_capability is None
+    # a plan WITHOUT the diarization key (scripted caller) renders NEITHER
+    # flag — the core's own default applies
+    assert parsed.diarization_capability is None
+    assert parsed.no_diarization is False
+
+    # 450e7c78: a TUI plan always carries the key, and the argv renders the
+    # choice EXPLICITLY both ways (replay-stable against core default drift)
+    plan["diarization_capability"] = "cjm-capability-pyannote"
+    parsed = core_build_parser().parse_args(plan_argv(plan, args))
+    assert parsed.diarization_capability == "cjm-capability-pyannote"
+    assert parsed.no_diarization is False
+    plan["diarization_capability"] = None
+    parsed = core_build_parser().parse_args(plan_argv(plan, args))
+    assert parsed.diarization_capability is None
+    assert parsed.no_diarization is True
+    del plan["diarization_capability"]
 
     # the in-TUI A/B verdict rides the plan and WINS over the passthrough flag;
     # toggled-off (plan None) falls back to the flag for scripted runs
@@ -150,10 +166,13 @@ def test_state_roundtrip_and_role_discovery(tmp_path):
     _write_manifest(manifests, "cjm-capability-whisper", ["transcribe"], {})
     _write_manifest(manifests, "cjm-capability-demucs",
                     ["separate_vocals", "separate_stems"], {})
+    _write_manifest(manifests, "cjm-capability-pyannote", ["diarize"], {})
     assert discover_capability(str(manifests), "add_nodes") == "cjm-capability-graph-sqlite"
     assert discover_capability(str(manifests), "get_system_status") == "cjm-capability-monitor-nvidia"
     # preprocessing A/B (5aba2ab6): the d-toggle capability is role-discovered too
     assert discover_capability(str(manifests), "separate_vocals") == "cjm-capability-demucs"
+    # diarization rung (450e7c78): the s-toggle capability is role-discovered too
+    assert discover_capability(str(manifests), "diarize") == "cjm-capability-pyannote"
     assert discover_capability(str(manifests), "no_such_method") is None
 
     # state sidecar lands NEXT TO the manifests dir and round-trips merges
