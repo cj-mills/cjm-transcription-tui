@@ -7,7 +7,7 @@ is reproducible by copy-paste, and --plan-only stops at the printout.
 import argparse
 import os
 import shlex
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from cjm_substrate.core.workspace import resolve_workspace
 from cjm_transcription_core.cli import main as core_main
@@ -124,11 +124,35 @@ def plan_argv(
 
 
 def main() -> int:  # Console-script entry point (cjm-transcription-tui)
-    """Resolve settings (flags > persisted state > manifest discovery), run the
-    setup app, persist the confirmed choices, then print + exec the headless run."""
+    """Resolve the shared setup surface, run the Textual setup app, then hand
+    the confirmed plan off headless — resolve_settings + hand_off carry the
+    ladder and the tail, shared verbatim with the Qt shell's driver (DEC
+    dcf8a712: a resolution drift between shells would fork the
+    reproducibility contract)."""
     args = build_parser().parse_args()
-    # 5daadfc4 workspace: resolve before anything reads paths; export so the
-    # in-process core hand-off + capability workers are workspace-scoped.
+    s = resolve_settings(args)
+    app = TranscriptionApp(s["manifests_dir"], start_dir=s["start_dir"],
+                           runs_dir=s["runs_dir"],
+                           initial_sources=args.paths or None,
+                           sysmon_capability=s["sysmon_capability"],
+                           graph_capability=s["graph_capability"],
+                           graph_db_path=s["graph_db_path"],
+                           initial_picks=s["state"].get("picked_instance_ids"),
+                           initial_bookmarks=s["state"].get("bookmarks"),
+                           preprocessing_capability=s["preprocessing_capability"],
+                           diarization_capability=s["diarization_capability"],
+                           max_segment_duration=args.max_segment_duration)
+    return hand_off(app.run(), args)
+
+
+def resolve_settings(args: argparse.Namespace) -> Dict[str, Any]:  # Resolved setup surface
+    """Resolve the run-setup settings every shell shares (flags > persisted
+    state > manifest discovery), exporting CJM_WORKSPACE so the in-process core
+    hand-off + capability workers are workspace-scoped (5daadfc4). Extracted
+    from main() so the Qt shell's driver reuses the EXACT ladder (DEC
+    dcf8a712) — a resolution drift between shells would fork the
+    reproducibility contract. Mutates args.manifests_dir to its resolved
+    default (plan_argv reads it there)."""
     ws = resolve_workspace(explicit=args.workspace)
     if ws is not None:
         os.environ["CJM_WORKSPACE"] = str(ws.root)
@@ -141,33 +165,33 @@ def main() -> int:  # Console-script entry point (cjm-transcription-tui)
     graph_capability = None if args.no_graph else (
         args.graph_capability or state.get("graph_capability")
         or discover_capability(args.manifests_dir, "add_nodes"))
-    graph_db_path = args.graph_db_path or state.get("graph_db_path")
     sysmon = None if args.no_sysmon else (
         args.sysmon_capability or state.get("sysmon_capability")
         or discover_capability(args.manifests_dir, "get_system_status"))
-    # Diarization rides the same resolution ladder (flags > state > surface
-    # discovery); default-ON matches the core rung — an undiarized run takes an
-    # explicit --no-diarization or the in-app s toggle, never a forgotten flag.
+    # Diarization rides the same ladder; default-ON matches the core rung.
     diarization = None if args.no_diarization else (
         args.diarization_capability or state.get("diarization_capability")
         or discover_capability(args.manifests_dir, "diarize"))
     start_dir = args.start_dir if args.start_dir != "." else (
         state.get("last_cwd") or (str(ws.root) if ws is not None else "."))
-    app = TranscriptionApp(args.manifests_dir, start_dir=start_dir,
-                           runs_dir=(str(ws.runs_dir) if ws is not None else "runs"),
-                           initial_sources=args.paths or None,
-                           sysmon_capability=sysmon,
-                           graph_capability=graph_capability,
-                           graph_db_path=graph_db_path,
-                           initial_picks=state.get("picked_instance_ids"),
-                           initial_bookmarks=state.get("bookmarks"),
-                           preprocessing_capability=(
-                               args.preprocessing_capability
-                               or discover_capability(args.manifests_dir,
-                                                      "separate_vocals")),
-                           diarization_capability=diarization,
-                           max_segment_duration=args.max_segment_duration)
-    plan = app.run()
+    return {"manifests_dir": args.manifests_dir,
+            "runs_dir": str(ws.runs_dir) if ws is not None else "runs",
+            "start_dir": start_dir,
+            "graph_capability": graph_capability,
+            "graph_db_path": args.graph_db_path or state.get("graph_db_path"),
+            "sysmon_capability": sysmon,
+            "diarization_capability": diarization,
+            "preprocessing_capability": (
+                args.preprocessing_capability
+                or discover_capability(args.manifests_dir, "separate_vocals")),
+            "state": state}
+
+
+def hand_off(plan: Optional[Dict[str, Any]], args: argparse.Namespace) -> int:  # Exit code
+    """The shared driver tail: persist the confirmed choices, print the
+    equivalent headless command, then exec it in-process — every shell's
+    confirmed run replays by copy-paste (extracted from main() alongside
+    resolve_settings; the Qt driver calls it with its window's plan)."""
     if not plan:
         print("no run confirmed")
         return 0
