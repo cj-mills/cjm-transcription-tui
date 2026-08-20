@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cjm-transcription-tui"
-version = "0.0.4"
+version = "0.0.5"
 description = "Transcription-workflow TUI driver: source/folder selection, candidate (capability, model)-instance setup from manifest config schemas, and per-segment side-by-side transcriber comparison to pick a run's lightweight/accuracy pair — then hands off to cjm-transcription-core's headless pipeline. Born on-graph."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -16,7 +16,7 @@ classifiers = [
 ]
 dependencies = [
     'cjm-substrate-tui-kit>=0.0.1',
-    'cjm-transcription-core>=0.0.7',
+    'cjm-transcription-core>=0.0.8',
     'textual',
 ]
 

@@ -22,18 +22,18 @@ from cjm_substrate_tui_kit.audio import ChunkPlayer, load_chunk
 from cjm_substrate_tui_kit.form import ConfigForm
 from cjm_substrate_tui_kit.repaint import RepaintThrottle
 from cjm_substrate_tui_kit.viewport import tail, visible_slice
+from cjm_transcription_core.candidates import (candidate_directives, model_axis, spec_string,
+                                               transcription_manifests)
 from cjm_transcription_core.cli import expand_sources, load_capabilities
 from cjm_transcription_core.models import PipelineConfig
+from cjm_transcription_core.probe import SegmentProbe
+from cjm_transcription_core.results import RunIndex
+from cjm_transcription_core.sources import CollectionField, SourceBrowser
+from cjm_transcription_core.state import save_state
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Input, Static
-
-from .candidates import candidate_directives, model_axis, spec_string, transcription_manifests
-from .probe import SegmentProbe
-from .results import RunIndex
-from .sources import CollectionField, SourceBrowser
-from .state import save_state
 
 
 class TranscriptionApp(App):
